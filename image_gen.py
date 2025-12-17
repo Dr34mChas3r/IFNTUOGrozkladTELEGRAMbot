@@ -5,7 +5,7 @@ from collections import defaultdict
 from PIL import Image, ImageDraw, ImageFont
 
 class ScheduleImageGenerator:
-    def __init__(self, font_path="Roboto-Regular.ttf"):
+    def __init__(self, font_path="/usr/share/fonts/truetype/roboto/unhinted/RobotoTTF/Roboto-Regular.ttf"):
         self.BG_COLOR = "#F0F2F5"
         self.TEXT_MAIN = "#000000"
         self.TEXT_SEC = "#555555"
