@@ -33,7 +33,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-TIMEZONE = pytz.timezone('Europe/Kiev')
+TIMEZONE = pytz.timezone('Europe/Kyiv')
 DAILY_NOTIFICATION_TIME = time(17, 0)
 WEEKLY_NOTIFICATION_TIME = time(17, 0)  # Неділя
 WEEKLY_NOTIFICATION_DAY = 6             # 6 = Неділя
