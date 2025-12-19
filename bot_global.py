@@ -33,7 +33,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-TIMEZONE = pytz.timezone('Europe/Kyiv')
+TIMEZONE = pytz.timezone('Europe/Kiev')
 DAILY_NOTIFICATION_TIME = time(17, 0)
 WEEKLY_NOTIFICATION_TIME = time(17, 0)  # Неділя
 WEEKLY_NOTIFICATION_DAY = 6             # 6 = Неділя
@@ -457,7 +457,7 @@ class ScheduleBot:
         self.formatter = ScheduleFormatter()
         self.user_manager = UserManager()
         self.cache_manager = ScheduleCache()
-        self.image_generator = ScheduleImageGenerator(font_path="/usr/share/fonts/truetype/roboto/unhinted/RobotoTTF/Roboto-Regular.ttf") if ScheduleImageGenerator else None
+        self.image_generator = ScheduleImageGenerator(font_path="arial.ttf") if ScheduleImageGenerator else None
         self.application = None
         self._schedule_check_running = False
 
@@ -467,10 +467,8 @@ class ScheduleBot:
         self.application.job_queue.run_daily(self._weekly_notification_job, time=WEEKLY_NOTIFICATION_TIME, days=[WEEKLY_NOTIFICATION_DAY])
         self.application.job_queue.run_repeating(self._check_schedule_changes_job, interval=SCHEDULE_CHECK_INTERVAL, first=30)
 
-    # --- Головна функція перевірки прав ---
     async def _is_user_admin(self, update: Update) -> bool:
         """Перевіряє, чи є користувач адміном у цьому чаті"""
-        # У приватних чатах користувач завжди адмін сам собі
         if update.effective_chat.type == ChatType.PRIVATE: return True
         try:
             member = await update.effective_chat.get_member(update.effective_user.id)
@@ -480,7 +478,7 @@ class ScheduleBot:
     def _get_events(self, group_id: str) -> List[ScheduleEvent]:
         return NungParser.get_schedule(group_id, obj_type='group')
 
-    # --- Jobs ---
+    # --- Jobs (Оновлено) ---
     async def _weekly_notification_job(self, context: ContextTypes.DEFAULT_TYPE):
         users = [uid for uid, s in self.user_manager.users.items() if s.daily_notifications]
         tomorrow = datetime.now(TIMEZONE).date() + timedelta(days=1)
@@ -488,6 +486,10 @@ class ScheduleBot:
             s = self.user_manager.get_user_settings(chat_id)
             if not s.group_id: continue
             events = NungParser.get_schedule(s.group_id, start_date=tomorrow, end_date=tomorrow + timedelta(days=6))
+            
+            # Якщо пар на тиждень немає — не надсилаємо
+            if not events: continue
+
             if self.image_generator:
                 photo_bio = self.image_generator.create_week_image(events, tomorrow)
                 try:
@@ -501,8 +503,12 @@ class ScheduleBot:
         for chat_id in users:
             s = self.user_manager.get_user_settings(chat_id)
             if not s.group_id: continue
-            events = [e for e in NungParser.get_schedule(s.group_id) if e.start_time.date() == tomorrow]
+            all_events = NungParser.get_schedule(s.group_id)
+            events = [e for e in all_events if e.start_time.date() == tomorrow]
+            
+            # Якщо пар немає — не надсилаємо
             if not events: continue
+            
             if self.image_generator:
                 photo_bio = self.image_generator.create_day_image(events, tomorrow)
                 try: await context.bot.send_photo(chat_id=chat_id, photo=photo_bio, caption=f"📅 Завтра: {s.group_name}")
@@ -515,11 +521,23 @@ class ScheduleBot:
             active_group_ids = set()
             for s in self.user_manager.users.values():
                 if s.group_id and s.change_notifications: active_group_ids.add(s.group_id)
+            
             for group_id in active_group_ids:
                 new_events = NungParser.get_schedule(group_id, obj_type='group')
+                
+                # --- ЗАХИСТ ВІД НІЧНИХ ЗБОЇВ API ---
+                if not new_events:
+                    old_events = self.cache_manager._group_caches.get(group_id, [])
+                    if old_events:
+                        logger.warning(f"⚠️ Отримано пустий розклад для {group_id}. Можливо, збій API. Пропускаємо оновлення.")
+                        continue
+                # -----------------------------------
+
                 changes = self.cache_manager.update_and_detect_changes(group_id, new_events)
                 if changes:
                     text_changes = self.formatter.format_changes(changes)
+                    if not text_changes.strip(): continue # Не надсилаємо пусті повідомлення
+                    
                     targets = [uid for uid, s in self.user_manager.users.items() if s.group_id == group_id and s.change_notifications]
                     for chat_id in targets:
                         try: await context.bot.send_message(chat_id=chat_id, text=text_changes, parse_mode=ParseMode.HTML)
@@ -536,7 +554,6 @@ class ScheduleBot:
         await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=self.get_main_keyboard())
 
     async def group_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        # ЗАХИСТ КОМАНДИ /group
         if not await self._is_user_admin(update): return await update.message.reply_text("⛔ Тільки адміністратори чату можуть змінювати групу.")
         if not context.args: return await update.message.reply_text("❌ Приклад: `/group КІ-24-1`", parse_mode=ParseMode.MARKDOWN)
         group_name = " ".join(context.args)
@@ -650,7 +667,6 @@ class ScheduleBot:
         
         kb_rows = []
         if is_admin:
-            # Показуємо кнопки тільки якщо адмін
             kb_rows.append([InlineKeyboardButton(f"Сповіщення {'✅' if s.change_notifications else '❌'}", callback_data="toggle_changes")])
             kb_rows.append([InlineKeyboardButton(f"Щоденно {'✅' if s.daily_notifications else '❌'}", callback_data="toggle_daily")])
         
@@ -685,7 +701,6 @@ class ScheduleBot:
         elif data == "notifications": await self.notifications_command(update, context)
             
         elif data.startswith("toggle_"):
-            # ЗАХИСТ КНОПОК: Перевірка, чи натиснув адмін
             if not await self._is_user_admin(update):
                 await query.answer("⛔ Тільки адміністратори можуть змінювати налаштування!", show_alert=True)
                 return
