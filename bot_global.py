@@ -457,7 +457,7 @@ class ScheduleBot:
         self.formatter = ScheduleFormatter()
         self.user_manager = UserManager()
         self.cache_manager = ScheduleCache()
-        self.image_generator = ScheduleImageGenerator(font_path="arial.ttf") if ScheduleImageGenerator else None
+        self.image_generator = ScheduleImageGenerator(font_path="/usr/share/fonts/truetype/roboto/unhinted/RobotoTTF/Roboto-Regular.ttf") if ScheduleImageGenerator else None
         self.application = None
         self._schedule_check_running = False
 
