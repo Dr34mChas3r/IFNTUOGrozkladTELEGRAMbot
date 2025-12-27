@@ -34,10 +34,11 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 TIMEZONE = pytz.timezone('Europe/Kyiv')
-DAILY_NOTIFICATION_TIME = time(16, 0)
-WEEKLY_NOTIFICATION_TIME = time(16, 0)  
-WEEKLY_NOTIFICATION_DAY = 7             
+DAILY_NOTIFICATION_TIME = time(5, 0)  # GMT+2 7:00 ранку для сповіщення на СЬОГОДНІ
+WEEKLY_NOTIFICATION_TIME = time(15, 00)  # GMT+2  15:00 Неділя , щотижневе
+WEEKLY_NOTIFICATION_DAY = 0  # Неділя (0=НД, 6=СБ)
 SCHEDULE_CHECK_INTERVAL = 30 * 60
+MAX_PINNED_MESSAGES = 5  # Максимум закріплених повідомлень від бота
 
 # --- Enums & Classes ---
 
@@ -130,10 +131,19 @@ class UserSettings:
         self.group_id: Optional[str] = None
         self.change_notifications = False
         self.daily_notifications = False
-        self.weekly_message_id: Optional[int] = None
+        self.weekly_notifications = False  # НОВЕ: окреме налаштування для тижневих сповіщень
+        self.pinned_messages: List[int] = []  # НОВЕ: список ID закріплених повідомлень
 
     def to_dict(self) -> dict:
-        return {'chat_id': self.chat_id, 'group_name': self.group_name, 'group_id': self.group_id, 'change_notifications': self.change_notifications, 'daily_notifications': self.daily_notifications, 'weekly_message_id': self.weekly_message_id}
+        return {
+            'chat_id': self.chat_id,
+            'group_name': self.group_name,
+            'group_id': self.group_id,
+            'change_notifications': self.change_notifications,
+            'daily_notifications': self.daily_notifications,
+            'weekly_notifications': self.weekly_notifications,
+            'pinned_messages': self.pinned_messages
+        }
 
     @classmethod
     def from_dict(cls, data: dict) -> 'UserSettings':
@@ -142,7 +152,8 @@ class UserSettings:
         settings.group_id = data.get('group_id')
         settings.change_notifications = data.get('change_notifications', False)
         settings.daily_notifications = data.get('daily_notifications', False)
-        settings.weekly_message_id = data.get('weekly_message_id')
+        settings.weekly_notifications = data.get('weekly_notifications', False)
+        settings.pinned_messages = data.get('pinned_messages', [])
         return settings
 
 class ScheduleCache:
@@ -247,7 +258,7 @@ class NungParser:
     @staticmethod
     def _normalize(text):
         if not text: return ""
-        text = text.lower().replace("–", "-").replace("—", "-").replace(" ", "").replace("`", "").replace("'", "").replace("’", "")
+        text = text.lower().replace("–", "-").replace("—", "-").replace(" ", "").replace("`", "").replace("'", "").replace("'", "")
         trans_table = str.maketrans({'i': 'і', 'k': 'к', 'c': 'с', 'o': 'о', 'p': 'р', 'x': 'х', 'a': 'а', 'e': 'е', 'h': 'н', 't': 'т', 'm': 'м', 'b': 'в'})
         return text.translate(trans_table)
 
@@ -478,9 +489,34 @@ class ScheduleBot:
     def _get_events(self, group_id: str) -> List[ScheduleEvent]:
         return NungParser.get_schedule(group_id, obj_type='group')
 
+    async def _pin_message_with_management(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int):
+        """Закріплює повідомлення та керує чергою закріплених повідомлень"""
+        settings = self.user_manager.get_user_settings(chat_id)
+        
+        try:
+            # Закріплюємо нове повідомлення
+            await context.bot.pin_chat_message(chat_id=chat_id, message_id=message_id, disable_notification=True)
+            
+            # Додаємо в список
+            settings.pinned_messages.append(message_id)
+            
+            # Якщо перевищено ліміт - відкріплюємо найстаріше
+            if len(settings.pinned_messages) > MAX_PINNED_MESSAGES:
+                oldest_message_id = settings.pinned_messages.pop(0)
+                try:
+                    await context.bot.unpin_chat_message(chat_id=chat_id, message_id=oldest_message_id)
+                except Exception as e:
+                    logger.warning(f"Не вдалося відкріпити повідомлення {oldest_message_id}: {e}")
+            
+            # Зберігаємо оновлений список
+            self.user_manager.update_user_setting(chat_id, 'pinned_messages', settings.pinned_messages)
+            
+        except Exception as e:
+            logger.error(f"Помилка закріплення повідомлення: {e}")
+
     # --- Jobs (Оновлено) ---
     async def _weekly_notification_job(self, context: ContextTypes.DEFAULT_TYPE):
-        users = [uid for uid, s in self.user_manager.users.items() if s.daily_notifications]
+        users = [uid for uid, s in self.user_manager.users.items() if s.weekly_notifications]
         tomorrow = datetime.now(TIMEZONE).date() + timedelta(days=1)
         for chat_id in users:
             s = self.user_manager.get_user_settings(chat_id)
@@ -494,24 +530,28 @@ class ScheduleBot:
                 photo_bio = self.image_generator.create_week_image(events, tomorrow)
                 try:
                     msg = await context.bot.send_photo(chat_id=chat_id, photo=photo_bio, caption=f"📅 Тиждень: {s.group_name}")
-                    self.user_manager.update_user_setting(chat_id, 'weekly_message_id', msg.message_id)
+                    # Закріплюємо повідомлення
+                    await self._pin_message_with_management(context, chat_id, msg.message_id)
                 except Exception as e: logger.error(f"Weekly error: {e}")
 
     async def _daily_notification_job(self, context: ContextTypes.DEFAULT_TYPE):
-        tomorrow = (datetime.now(TIMEZONE) + timedelta(days=1)).date()
+        today = datetime.now(TIMEZONE).date()  # ЗМІНЕНО: тепер надсилаємо на СЬОГОДНІ о 5 ранку
         users = [uid for uid, s in self.user_manager.users.items() if s.daily_notifications]
         for chat_id in users:
             s = self.user_manager.get_user_settings(chat_id)
             if not s.group_id: continue
             all_events = NungParser.get_schedule(s.group_id)
-            events = [e for e in all_events if e.start_time.date() == tomorrow]
+            events = [e for e in all_events if e.start_time.date() == today]
             
             # Якщо пар немає — не надсилаємо
             if not events: continue
             
             if self.image_generator:
-                photo_bio = self.image_generator.create_day_image(events, tomorrow)
-                try: await context.bot.send_photo(chat_id=chat_id, photo=photo_bio, caption=f"📅 Завтра: {s.group_name}")
+                photo_bio = self.image_generator.create_day_image(events, today)
+                try: 
+                    msg = await context.bot.send_photo(chat_id=chat_id, photo=photo_bio, caption=f"📅 Сьогодні: {s.group_name}")
+                    # Закріплюємо повідомлення
+                    await self._pin_message_with_management(context, chat_id, msg.message_id)
                 except Exception as e: logger.error(f"Daily error: {e}")
 
     async def _check_schedule_changes_job(self, context: ContextTypes.DEFAULT_TYPE):
@@ -540,7 +580,10 @@ class ScheduleBot:
                     
                     targets = [uid for uid, s in self.user_manager.users.items() if s.group_id == group_id and s.change_notifications]
                     for chat_id in targets:
-                        try: await context.bot.send_message(chat_id=chat_id, text=text_changes, parse_mode=ParseMode.HTML)
+                        try: 
+                            msg = await context.bot.send_message(chat_id=chat_id, text=text_changes, parse_mode=ParseMode.HTML)
+                            # Закріплюємо повідомлення зі змінами
+                            await self._pin_message_with_management(context, chat_id, msg.message_id)
                         except: pass
         except Exception as e: logger.error(f"Check job error: {e}")
         finally: self._schedule_check_running = False
@@ -667,8 +710,9 @@ class ScheduleBot:
         
         kb_rows = []
         if is_admin:
-            kb_rows.append([InlineKeyboardButton(f"Сповіщення {'✅' if s.change_notifications else '❌'}", callback_data="toggle_changes")])
-            kb_rows.append([InlineKeyboardButton(f"Щоденно {'✅' if s.daily_notifications else '❌'}", callback_data="toggle_daily")])
+            kb_rows.append([InlineKeyboardButton(f"Сповіщення про зміни {'✅' if s.change_notifications else '❌'}", callback_data="toggle_changes")])
+            kb_rows.append([InlineKeyboardButton(f"Щоденно о {DAILY_NOTIFICATION_TIME} {'✅' if s.daily_notifications else '❌'}", callback_data="toggle_daily")])
+            kb_rows.append([InlineKeyboardButton(f"Розклад на тиждень о {WEEKLY_NOTIFICATION_TIME} {'✅' if s.weekly_notifications else '❌'}", callback_data="toggle_weekly")])
         
         kb_rows.append([InlineKeyboardButton("◀️ Назад", callback_data="back")])
         text = f"⚙️ Група: <b>{s.group_name}</b>"
@@ -705,7 +749,15 @@ class ScheduleBot:
                 await query.answer("⛔ Тільки адміністратори можуть змінювати налаштування!", show_alert=True)
                 return
             
-            setting = "change_notifications" if data == "toggle_changes" else "daily_notifications"
+            if data == "toggle_changes":
+                setting = "change_notifications"
+            elif data == "toggle_daily":
+                setting = "daily_notifications"
+            elif data == "toggle_weekly":
+                setting = "weekly_notifications"
+            else:
+                return
+            
             curr = getattr(self.user_manager.get_user_settings(update.effective_chat.id), setting)
             self.user_manager.update_user_setting(update.effective_chat.id, setting, not curr)
             await self.notifications_command(update, context)
