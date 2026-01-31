@@ -73,7 +73,7 @@ class ScheduleEvent:
         text = re.sub(r'(доцент|професор|викладач|асистент|зав\.каф\.)\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+(\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+)?', '', text)
         text = re.sub(r'(доцент|професор|викладач|асистент|зав\.каф\.)\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+\s+[A-ZА-ЯІЇЄ]\.([A-ZА-ЯІЇЄ]\.)?', '', text)
         text = re.sub(r'\d+[^\s]*\.ауд\.', '', text)
-        text = re.sub(r'\(підгр\.\s*\d+\)', '', text)
+      #  text = re.sub(r'\(підгр\.\s*\d+\)', '', text)
         text = text.replace('*', '').strip()
         text = re.sub(r'\s+', ' ', text)
         return text.strip()
