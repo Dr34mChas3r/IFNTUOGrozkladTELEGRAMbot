@@ -10,6 +10,7 @@ from enum import Enum
 from io import BytesIO
 
 import requests
+from bs4 import BeautifulSoup
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, ChatMember
 from telegram.constants import ChatType, ParseMode
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -34,11 +35,11 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 TIMEZONE = pytz.timezone('Europe/Kyiv')
-DAILY_NOTIFICATION_TIME = time(5, 0)  # GMT+2 7:00 ранку для сповіщення на СЬОГОДНІ
-WEEKLY_NOTIFICATION_TIME = time(15, 00)  # GMT+2  15:00 Неділя , щотижневе
-WEEKLY_NOTIFICATION_DAY = 0  # Неділя (0=НД, 6=СБ)
+DAILY_NOTIFICATION_TIME = time(5, 0)
+WEEKLY_NOTIFICATION_TIME = time(15, 00)
+WEEKLY_NOTIFICATION_DAY = 0
 SCHEDULE_CHECK_INTERVAL = 30 * 60
-MAX_PINNED_MESSAGES = 5  # Максимум закріплених повідомлень від бота
+MAX_PINNED_MESSAGES = 5
 
 # --- Enums & Classes ---
 
@@ -64,26 +65,22 @@ class ScheduleEvent:
 
     def _clean_subject(self, text: str) -> str:
         text = re.sub(r'(?i)дистанційно', '', text)
-        
-        # Видаляємо тип заняття ТІЛЬКИ якщо він у дужках
         if self.event_type:
             escaped_type = re.escape(self.event_type)
             text = re.sub(fr'\({escaped_type}\)', '', text, flags=re.IGNORECASE)
-            
         if self.teacher:
             text = text.replace(self.teacher, '')
-        
         text = re.sub(r'(доцент|професор|викладач|асистент|зав\.каф\.)\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+(\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+)?', '', text)
         text = re.sub(r'(доцент|професор|викладач|асистент|зав\.каф\.)\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+\s+[A-ZА-ЯІЇЄ]\.([A-ZА-ЯІЇЄ]\.)?', '', text)
         text = re.sub(r'\d+[^\s]*\.ауд\.', '', text)
         text = re.sub(r'\(підгр\.\s*\d+\)', '', text)
-        
         text = text.replace('*', '').strip()
         text = re.sub(r'\s+', ' ', text)
         return text.strip()
 
     def _calculate_hash(self) -> str:
-        key_data = f"{self.start_time.isoformat()}-{self.subject}-{self.teacher}-{self.room}-{self.group}-{self.is_remote}"
+        links_str = ",".join(self.links)
+        key_data = f"{self.start_time.isoformat()}-{self.subject}-{self.teacher}-{self.room}-{self.group}-{self.is_remote}-{links_str}"
         return hashlib.md5(key_data.encode()).hexdigest()[:8]
 
     def get_unique_key(self) -> str:
@@ -131,8 +128,8 @@ class UserSettings:
         self.group_id: Optional[str] = None
         self.change_notifications = False
         self.daily_notifications = False
-        self.weekly_notifications = False  # НОВЕ: окреме налаштування для тижневих сповіщень
-        self.pinned_messages: List[int] = []  # НОВЕ: список ID закріплених повідомлень
+        self.weekly_notifications = False
+        self.pinned_messages: List[int] = []
 
     def to_dict(self) -> dict:
         return {
@@ -253,6 +250,7 @@ class UserManager:
 
 class NungParser:
     API_URL = "https://dekanat.nung.edu.ua/cgi-bin/timetable_export.cgi"
+    HTML_URL = "https://dekanat.nung.edu.ua/cgi-bin/timetable.cgi?n=700"
     _global_cache = {'teachers': [], 'rooms': [], 'timestamp': None}
 
     @staticmethod
@@ -315,12 +313,71 @@ class NungParser:
                     for block in root.get('blocks', []): objects.extend(block.get('objects', []))
             return objects
         except: return []
+    
+    @staticmethod
+    def _fetch_links_map(group_name: str) -> Dict[str, str]:
+        links_map = {}
+        if not group_name: return links_map
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Referer': 'https://dekanat.nung.edu.ua/cgi-bin/timetable.cgi?n=700'
+        }
+        
+        try:
+            payload = {
+                'n': '700', 'faculty': '0', 'teacher': '', 'course': '0',
+                'group': group_name.encode('windows-1251'), 
+                'sdate': '', 'edate': ''
+            }
+            
+            response = requests.post(NungParser.HTML_URL, data=payload, headers=headers, timeout=8)
+            response.encoding = 'windows-1251'
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            for link_div in soup.find_all('div', class_='link'):
+                a_tag = link_div.find('a', href=True)
+                if not a_tag: continue
+                
+                url = a_tag['href']
+                if not any(x in url for x in ['google.com', 'zoom.us', 'teams', 'webex']):
+                    continue
+
+                curr = link_div.previous_sibling
+                found_name = None
+                
+                for _ in range(5):
+                    if not curr: break
+                    text = ""
+                    if isinstance(curr, str): text = curr.strip()
+                    elif hasattr(curr, 'get_text'): text = curr.get_text(strip=True)
+                    
+                    if len(text) > 3:
+                        match = re.search(r'([A-ZА-ЯІЇЄ][a-zа-яіїє\']+)\s+[A-ZА-ЯІЇЄ]', text)
+                        if match:
+                            found_name = match.group(1)
+                            break
+                    curr = curr.previous_sibling
+
+                if found_name:
+                    links_map[found_name] = url
+                        
+        except Exception as e:
+            logger.error(f"HTML Link Parsing Error: {e}")
+            
+        return links_map
 
     @staticmethod
-    def get_schedule(obj_id: str, start_date: date = None, end_date: date = None, obj_type: str = 'group') -> List[ScheduleEvent]:
+    def get_schedule(obj_id: str, start_date: date = None, end_date: date = None, obj_type: str = 'group', group_name: str = None) -> List[ScheduleEvent]:
         if not start_date: start_date = datetime.now(TIMEZONE).date() - timedelta(days=1)
         if not end_date: end_date = datetime.now(TIMEZONE).date() + timedelta(days=30)
-        return NungParser.get_schedule_json(obj_id, obj_type, start_date, end_date)
+        
+        links_map = {}
+        if obj_type == 'group' and group_name:
+            links_map = NungParser._fetch_links_map(group_name)
+
+        return NungParser.get_schedule_json(obj_id, obj_type, start_date, end_date, links_map)
 
     @staticmethod
     def _split_merged_events(description: str) -> List[str]:
@@ -351,10 +408,10 @@ class NungParser:
         return results
 
     @staticmethod
-    def get_schedule_json(obj_id: str, obj_mode: str, start_date: date, end_date: date) -> List[ScheduleEvent]:
+    def get_schedule_json(obj_id: str, obj_mode: str, start_date: date, end_date: date, links_map: Dict[str, str] = None) -> List[ScheduleEvent]:
         params = {
             'req_type': 'rozklad', 'req_mode': obj_mode, 'OBJ_ID': obj_id,
-            'ros_text': 'united', 'begin_date': start_date.strftime('%d.%m.%Y'),
+            'ros_text': 'separated', 'begin_date': start_date.strftime('%d.%m.%Y'),
             'end_date': end_date.strftime('%d.%m.%Y'), 'req_format': 'json', 'coding_mode': 'UTF8', 'bs': 'ok'
         }
         try:
@@ -366,9 +423,11 @@ class NungParser:
             items = root.get('roz_items', []) if root else []
 
             for item in items:
-                original_desc = item.get('lesson_description', '').strip()
-                if not original_desc: continue
+                original_desc = item.get('lesson_description', '').strip() or \
+                                f"{item.get('title', '')} {item.get('teacher', '')} {item.get('room', '')}"
+                
                 descriptions = NungParser._split_merged_events(original_desc)
+                json_link = item.get('link') or item.get('url') or ""
                 
                 for description in descriptions:
                     date_str = item.get('date')
@@ -382,34 +441,42 @@ class NungParser:
                         end_dt = TIMEZONE.localize(datetime.combine(date_obj, end_time))
                     except ValueError: continue
 
-                    room = ""
-                    room_match = re.search(r'(\d+[^\s]*\.ауд\.)', description)
-                    if room_match: room = room_match.group(1)
+                    room = item.get('room') or ""
+                    if not room:
+                        room_match = re.search(r'(\d+[^\s]*\.ауд\.)', description)
+                        if room_match: room = room_match.group(1)
 
-                    event_type = ""
-                    type_match = re.search(r'\((Л|Пр|Лаб|Л\+Пр|Sem|Екз|Конс)\)', description)
-                    if type_match: event_type = type_match.group(1)
+                    event_type = item.get('type') or ""
+                    if not event_type:
+                        type_match = re.search(r'\((Л|Пр|Лаб|Л\+Пр|Sem|Екз|Конс)\)', description)
+                        if type_match: event_type = type_match.group(1)
 
                     clean_text = description.replace('*', '').strip()
-                    teacher_name = ""
-                    group_name = ""
-                    subgroup_match = re.search(r'\(підгр\.\s*(\d+)\)', clean_text)
-                    if subgroup_match: group_name = f"(підгр. {subgroup_match.group(1)})"
-
-                    if obj_mode == 'group':
+                    teacher_name = item.get('teacher') or ""
+                    
+                    if not teacher_name and obj_mode == 'group':
                         tm = re.search(r'(доцент|професор|викладач|асистент|зав\.каф\.)\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+(\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+)?', clean_text)
-                        if not tm: tm = re.search(r'(доцент|професор|викладач|асистент|зав\.каф\.)\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+\s+[A-ZА-ЯІЇЄ]\.([A-ZА-ЯІЇЄ]\.)?', clean_text)
                         if tm: teacher_name = tm.group(0)
-                    else:
-                        gm = re.search(r'([A-ZА-ЯІЇЄ]{2,4}-\d{2}-\d)', clean_text)
-                        if gm: group_name = f"{gm.group(0)} {group_name}".strip()
 
-                    is_remote = "дистанційно" in clean_text.lower()
+                    group_name = item.get('object') or ""
+                    
+                    is_remote = (item.get('online') in ['Tak', 'Yes', '1']) or "дистанційно" in clean_text.lower()
                     clean_text = re.sub(r'(?i)дистанційно', '', clean_text).strip()
+                    if not clean_text and item.get('title'): clean_text = item.get('title')
+
+                    final_links = []
+                    if json_link:
+                        final_links.append(json_link)
+                    
+                    if not final_links and links_map and teacher_name:
+                        for surname, html_link in links_map.items():
+                            if surname in teacher_name:
+                                final_links.append(html_link)
+                                break
 
                     event_data = {
                         'subject': clean_text, 'type': event_type, 'teacher': teacher_name, 
-                        'room': room, 'group': group_name, 'is_remote': is_remote, 'links': [], 
+                        'room': room, 'group': group_name, 'is_remote': is_remote, 'links': final_links, 
                         'start_time': start_dt, 'end_time': end_dt
                     }
                     events.append(ScheduleEvent(event_data))
@@ -433,6 +500,15 @@ class ScheduleFormatter:
             lines.append(subj_line)
             if event.teacher: lines.append(f"👤🎓 {event.teacher}")
             if event.room: lines.append(f"📍 {event.room}")
+            
+            if event.links:
+                for link in event.links:
+                    link_name = "Посилання на пару 🔗"
+                    if "zoom" in link: link_name = "Zoom 🎥"
+                    elif "meet.google" in link: link_name = "Google Meet 🎥"
+                    elif "teams" in link: link_name = "Teams 🎥"
+                    lines.append(f'<a href="{link}">{link_name}</a>')
+        
         return "\n".join(lines)
 
     @classmethod
@@ -479,78 +555,56 @@ class ScheduleBot:
         self.application.job_queue.run_repeating(self._check_schedule_changes_job, interval=SCHEDULE_CHECK_INTERVAL, first=30)
 
     async def _is_user_admin(self, update: Update) -> bool:
-        """Перевіряє, чи є користувач адміном у цьому чаті"""
         if update.effective_chat.type == ChatType.PRIVATE: return True
         try:
             member = await update.effective_chat.get_member(update.effective_user.id)
             return member.status in [ChatMember.OWNER, ChatMember.ADMINISTRATOR]
         except: return False
 
-    def _get_events(self, group_id: str) -> List[ScheduleEvent]:
-        return NungParser.get_schedule(group_id, obj_type='group')
+    def _get_events(self, group_id: str, group_name: str = None) -> List[ScheduleEvent]:
+        return NungParser.get_schedule(group_id, obj_type='group', group_name=group_name)
 
     async def _pin_message_with_management(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int):
-        """Закріплює повідомлення та керує чергою закріплених повідомлень"""
         settings = self.user_manager.get_user_settings(chat_id)
-        
         try:
-            # Закріплюємо нове повідомлення
             await context.bot.pin_chat_message(chat_id=chat_id, message_id=message_id, disable_notification=True)
-            
-            # Додаємо в список
             settings.pinned_messages.append(message_id)
-            
-            # Якщо перевищено ліміт - відкріплюємо найстаріше
             if len(settings.pinned_messages) > MAX_PINNED_MESSAGES:
                 oldest_message_id = settings.pinned_messages.pop(0)
-                try:
-                    await context.bot.unpin_chat_message(chat_id=chat_id, message_id=oldest_message_id)
-                except Exception as e:
-                    logger.warning(f"Не вдалося відкріпити повідомлення {oldest_message_id}: {e}")
-            
-            # Зберігаємо оновлений список
+                try: await context.bot.unpin_chat_message(chat_id=chat_id, message_id=oldest_message_id)
+                except Exception as e: logger.warning(f"Unpin error: {e}")
             self.user_manager.update_user_setting(chat_id, 'pinned_messages', settings.pinned_messages)
-            
-        except Exception as e:
-            logger.error(f"Помилка закріплення повідомлення: {e}")
+        except Exception as e: logger.error(f"Pin error: {e}")
 
-    # --- Jobs (Оновлено) ---
+    # --- Jobs ---
     async def _weekly_notification_job(self, context: ContextTypes.DEFAULT_TYPE):
         users = [uid for uid, s in self.user_manager.users.items() if s.weekly_notifications]
         tomorrow = datetime.now(TIMEZONE).date() + timedelta(days=1)
         for chat_id in users:
             s = self.user_manager.get_user_settings(chat_id)
             if not s.group_id: continue
-            events = NungParser.get_schedule(s.group_id, start_date=tomorrow, end_date=tomorrow + timedelta(days=6))
-            
-            # Якщо пар на тиждень немає — не надсилаємо
+            events = NungParser.get_schedule(s.group_id, start_date=tomorrow, end_date=tomorrow + timedelta(days=6), group_name=s.group_name)
             if not events: continue
-
             if self.image_generator:
                 photo_bio = self.image_generator.create_week_image(events, tomorrow)
                 try:
                     msg = await context.bot.send_photo(chat_id=chat_id, photo=photo_bio, caption=f"📅 Тиждень: {s.group_name}")
-                    # Закріплюємо повідомлення
                     await self._pin_message_with_management(context, chat_id, msg.message_id)
                 except Exception as e: logger.error(f"Weekly error: {e}")
 
     async def _daily_notification_job(self, context: ContextTypes.DEFAULT_TYPE):
-        today = datetime.now(TIMEZONE).date()  # ЗМІНЕНО: тепер надсилаємо на СЬОГОДНІ о 5 ранку
+        today = datetime.now(TIMEZONE).date()
         users = [uid for uid, s in self.user_manager.users.items() if s.daily_notifications]
         for chat_id in users:
             s = self.user_manager.get_user_settings(chat_id)
             if not s.group_id: continue
-            all_events = NungParser.get_schedule(s.group_id)
+            all_events = NungParser.get_schedule(s.group_id, group_name=s.group_name)
             events = [e for e in all_events if e.start_time.date() == today]
-            
-            # Якщо пар немає — не надсилаємо
             if not events: continue
-            
             if self.image_generator:
                 photo_bio = self.image_generator.create_day_image(events, today)
                 try: 
                     msg = await context.bot.send_photo(chat_id=chat_id, photo=photo_bio, caption=f"📅 Сьогодні: {s.group_name}")
-                    # Закріплюємо повідомлення
                     await self._pin_message_with_management(context, chat_id, msg.message_id)
                 except Exception as e: logger.error(f"Daily error: {e}")
 
@@ -558,31 +612,24 @@ class ScheduleBot:
         if self._schedule_check_running: return
         self._schedule_check_running = True
         try:
-            active_group_ids = set()
+            active_groups = {} 
             for s in self.user_manager.users.values():
-                if s.group_id and s.change_notifications: active_group_ids.add(s.group_id)
+                if s.group_id and s.change_notifications: 
+                    active_groups[s.group_id] = s.group_name
             
-            for group_id in active_group_ids:
-                new_events = NungParser.get_schedule(group_id, obj_type='group')
-                
-                # --- ЗАХИСТ ВІД НІЧНИХ ЗБОЇВ API ---
+            for group_id, group_name in active_groups.items():
+                new_events = NungParser.get_schedule(group_id, obj_type='group', group_name=group_name)
                 if not new_events:
                     old_events = self.cache_manager._group_caches.get(group_id, [])
-                    if old_events:
-                        logger.warning(f"⚠️ Отримано пустий розклад для {group_id}. Можливо, збій API. Пропускаємо оновлення.")
-                        continue
-                # -----------------------------------
-
+                    if old_events: continue
                 changes = self.cache_manager.update_and_detect_changes(group_id, new_events)
                 if changes:
                     text_changes = self.formatter.format_changes(changes)
-                    if not text_changes.strip(): continue # Не надсилаємо пусті повідомлення
-                    
+                    if not text_changes.strip(): continue
                     targets = [uid for uid, s in self.user_manager.users.items() if s.group_id == group_id and s.change_notifications]
                     for chat_id in targets:
                         try: 
-                            msg = await context.bot.send_message(chat_id=chat_id, text=text_changes, parse_mode=ParseMode.HTML)
-                            # Закріплюємо повідомлення зі змінами
+                            msg = await context.bot.send_message(chat_id=chat_id, text=text_changes, parse_mode=ParseMode.HTML, disable_notification=True)
                             await self._pin_message_with_management(context, chat_id, msg.message_id)
                         except: pass
         except Exception as e: logger.error(f"Check job error: {e}")
@@ -594,7 +641,7 @@ class ScheduleBot:
         msg = f"👋 Привіт!\n"
         if s.group_name: msg += f"✅ Група: <b>{s.group_name}</b>\n"
         else: msg += "⚠️ Напишіть: <code>/group Назва</code>\n"
-        await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=self.get_main_keyboard())
+        await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=self.get_main_keyboard(), disable_notification=True)
 
     async def group_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await self._is_user_admin(update): return await update.message.reply_text("⛔ Тільки адміністратори чату можуть змінювати групу.")
@@ -603,17 +650,52 @@ class ScheduleBot:
         group_id = NungParser.get_group_id(group_name)
         if group_id:
             self.user_manager.update_user_group(update.effective_chat.id, group_name.upper(), group_id)
-            events = NungParser.get_schedule(group_id, obj_type='group')
+            events = NungParser.get_schedule(group_id, obj_type='group', group_name=group_name.upper())
             self.cache_manager.update_and_detect_changes(group_id, events)
             await update.message.reply_text(f"✅ Збережено: <b>{group_name.upper()}</b>", parse_mode=ParseMode.HTML, reply_markup=self.get_main_keyboard())
         else: await update.message.reply_text("❌ Групу не знайдено.")
 
     async def _send_schedule_image(self, update: Update, events: List[ScheduleEvent], date_obj: date, mode: str, caption: str):
-        if not self.image_generator: return await update.message.reply_text("❌ Помилка: генератор картинок вимкнено.")
+        if not self.image_generator: 
+            text_response = caption + "\n\n"
+            for e in events:
+                text_response += self.formatter._build_event_details(e) + "\n\n"
+            if update.callback_query: await update.callback_query.message.edit_text(text_response, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+            else: await update.effective_chat.send_message(text_response, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+            return
 
         if mode == 'week': bio = self.image_generator.create_week_image(events, date_obj)
         else: bio = self.image_generator.create_day_image(events, date_obj)
 
+        subject_links = {} 
+        for e in events:
+            if not e.links: continue
+            for link in e.links:
+                if e.subject not in subject_links: subject_links[e.subject] = {}
+                if link not in subject_links[e.subject]: subject_links[e.subject][link] = []
+                subject_links[e.subject][link].append(e.start_time)
+
+        links_text_lines = []
+        for subject, links_data in subject_links.items():
+            if len(links_data) == 1:
+                link = list(links_data.keys())[0]
+                link_name = "Zoom/Meet"
+                if "zoom" in link: link_name = "Zoom 🎥"
+                elif "meet" in link: link_name = "Meet 🎥"
+                links_text_lines.append(f"📚 {subject}: <a href=\"{link}\">{link_name}</a>")
+            else:
+                for link, times in links_data.items():
+                    link_name = "Zoom/Meet"
+                    if "zoom" in link: link_name = "Zoom 🎥"
+                    elif "meet" in link: link_name = "Meet 🎥"
+                    time_strs = [t.strftime("%d.%m %H:%M") for t in times]
+                    time_str = ", ".join(time_strs)
+                    links_text_lines.append(f"📚 {subject} ({time_str}): <a href=\"{link}\">{link_name}</a>")
+
+        full_caption = caption
+        if links_text_lines: 
+            full_caption += "\n\n🔗 <b>Посилання:</b>\n" + "\n".join(links_text_lines)
+        
         prev_date = (date_obj - timedelta(days=1)).strftime("%Y-%m-%d")
         next_date = (date_obj + timedelta(days=1)).strftime("%Y-%m-%d")
         if mode == 'week':
@@ -627,13 +709,17 @@ class ScheduleBot:
             [InlineKeyboardButton("◀️ Меню", callback_data="back")]
         ])
 
-        if update.callback_query and update.callback_query.message.photo:
-            media = InputMediaPhoto(media=bio, caption=caption)
-            try: await update.callback_query.edit_message_media(media=media, reply_markup=kb)
-            except Exception as e: logger.warning(f"Edit media warning: {e}")
+        if update.callback_query:
+            if update.callback_query.message.photo:
+                media = InputMediaPhoto(media=bio, caption=full_caption, parse_mode=ParseMode.HTML)
+                try: await update.callback_query.edit_message_media(media=media, reply_markup=kb)
+                except Exception as e: logger.warning(f"Edit media warning: {e}")
+            else:
+                # ТУТ ОСНОВНЕ ВИПРАВЛЕННЯ: disable_notification=True
+                await update.callback_query.message.delete()
+                await update.effective_chat.send_photo(photo=bio, caption=full_caption, reply_markup=kb, parse_mode=ParseMode.HTML, disable_notification=True)
         else:
-            if update.callback_query: await update.callback_query.message.delete()
-            await update.effective_chat.send_photo(photo=bio, caption=caption, reply_markup=kb)
+            await update.effective_chat.send_photo(photo=bio, caption=full_caption, reply_markup=kb, parse_mode=ParseMode.HTML, disable_notification=True)
 
     async def _generic_schedule_command(self, update: Update, mode='today', target_date=None):
         s = self.user_manager.get_user_settings(update.effective_chat.id)
@@ -646,7 +732,7 @@ class ScheduleBot:
         
         if mode == 'week': target_date = target_date - timedelta(days=target_date.weekday())
 
-        events = self._get_events(s.group_id)
+        events = self._get_events(s.group_id, s.group_name)
         if mode == 'week':
             filtered_events = [e for e in events if target_date <= e.start_time.date() <= target_date + timedelta(days=6)]
             caption = f"📅 Розклад: {s.group_name}"
@@ -684,7 +770,7 @@ class ScheduleBot:
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=callback_data)])
         
         keyboard.append([InlineKeyboardButton("❌ Скасувати", callback_data="delete_msg")])
-        await update.message.reply_text(f"🔍 Знайдено {len(results)}:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text(f"🔍 Знайдено {len(results)}:", reply_markup=InlineKeyboardMarkup(keyboard), disable_notification=True)
         
     async def search_local_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         s = self.user_manager.get_user_settings(update.effective_chat.id)
@@ -692,16 +778,15 @@ class ScheduleBot:
         if not context.args: return await update.message.reply_text("🔍 Приклад: `/search Математика`", parse_mode=ParseMode.MARKDOWN)
         
         query = " ".join(context.args)
-        events = self._get_events(s.group_id)
+        events = self._get_events(s.group_id, s.group_name)
         found = [e for e in events if e.matches_query(query) and e.start_time.date() >= datetime.now(TIMEZONE).date()]
-        
         if not found: return await update.message.reply_text("📭 Нічого не знайдено.")
         
         text = f"🔍 Результати для '{query}':\n\n"
         for e in found[:10]:
             text += self.formatter._build_event_details(e) + f"\n📆 {e.start_time.strftime('%d.%m')} {e.start_time.strftime('%H:%M')}\n\n"
         for part in self.formatter.split_long_message(text):
-            await update.message.reply_text(part, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+            await update.message.reply_text(part, parse_mode=ParseMode.HTML, disable_web_page_preview=True, disable_notification=True)
 
     async def notifications_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
@@ -716,13 +801,16 @@ class ScheduleBot:
         
         kb_rows.append([InlineKeyboardButton("◀️ Назад", callback_data="back")])
         text = f"⚙️ Група: <b>{s.group_name}</b>"
-        
         if not is_admin and update.effective_chat.type != ChatType.PRIVATE:
             text += "\n🔒 <i>Налаштування доступні лише адміністраторам.</i>"
 
         if update.callback_query:
-            await update.callback_query.message.delete() 
-            await update.effective_chat.send_message(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode=ParseMode.HTML)
+            try:
+                await update.callback_query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode=ParseMode.HTML)
+            except Exception:
+                await update.callback_query.message.delete()
+                # ТУТ ТЕЖ: disable_notification=True
+                await update.effective_chat.send_message(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode=ParseMode.HTML, disable_notification=True)
         else:
             await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode=ParseMode.HTML)
 
@@ -738,8 +826,17 @@ class ScheduleBot:
 
         if data == "delete_msg": await query.message.delete()
         elif data == "back":
-            await query.message.delete()
-            await query.message.chat.send_message("🏠 Головне меню:", reply_markup=self.get_main_keyboard())
+            if query.message.text:
+                try:
+                    await query.edit_message_text("🏠 Головне меню:", reply_markup=self.get_main_keyboard())
+                except:
+                    await query.message.delete()
+                    # ТИХА ВІДПРАВКА
+                    await query.message.chat.send_message("🏠 Головне меню:", reply_markup=self.get_main_keyboard(), disable_notification=True)
+            else:
+                await query.message.delete()
+                # ТИХА ВІДПРАВКА (була картинка, став текст)
+                await query.message.chat.send_message("🏠 Головне меню:", reply_markup=self.get_main_keyboard(), disable_notification=True)
         
         elif data in ['today', 'tomorrow', 'week']: await self._generic_schedule_command(update, data)
         elif data == "notifications": await self.notifications_command(update, context)
@@ -749,14 +846,10 @@ class ScheduleBot:
                 await query.answer("⛔ Тільки адміністратори можуть змінювати налаштування!", show_alert=True)
                 return
             
-            if data == "toggle_changes":
-                setting = "change_notifications"
-            elif data == "toggle_daily":
-                setting = "daily_notifications"
-            elif data == "toggle_weekly":
-                setting = "weekly_notifications"
-            else:
-                return
+            if data == "toggle_changes": setting = "change_notifications"
+            elif data == "toggle_daily": setting = "daily_notifications"
+            elif data == "toggle_weekly": setting = "weekly_notifications"
+            else: return
             
             curr = getattr(self.user_manager.get_user_settings(update.effective_chat.id), setting)
             self.user_manager.update_user_setting(update.effective_chat.id, setting, not curr)
@@ -795,7 +888,8 @@ class ScheduleBot:
                 if query.message.photo: await query.edit_message_media(media=InputMediaPhoto(bio, caption=f"Розклад: {obj_id}"), reply_markup=kb)
                 else:
                     await query.message.delete()
-                    await query.message.chat.send_photo(photo=bio, caption=f"Розклад: {obj_id}", reply_markup=kb)
+                    # ТИХА ВІДПРАВКА
+                    await query.message.chat.send_photo(photo=bio, caption=f"Розклад: {obj_id}", reply_markup=kb, disable_notification=True)
 
 def main():
     if not BOT_TOKEN: logger.error("BOT_TOKEN missing"); return
