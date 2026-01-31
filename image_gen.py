@@ -19,7 +19,7 @@ class ScheduleImageGenerator:
 
         self.WIDTH = 1200
         self.PADDING = 40
-        self.QR_SIZE = 100
+        self.QR_SIZE = 150
         
         try:
             self.font_header = ImageFont.truetype(font_path, 42)
