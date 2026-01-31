@@ -4,3 +4,4 @@ python-dotenv
 Pillow
 pytz
 beautifulsoup4
+qrcode[pil]
