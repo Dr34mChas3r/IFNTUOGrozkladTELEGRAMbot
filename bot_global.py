@@ -460,7 +460,7 @@ class NungParser:
 
                     group_name = item.get('object') or ""
                     
-                    is_remote = (item.get('online') in ['Tak', 'Yes', '1']) or "дистанційно" in clean_text.lower()
+                    is_remote = (item.get('online') in ['Так', 'Yes', '1']) or "дистанційно" in clean_text.lower()
                     clean_text = re.sub(r'(?i)дистанційно', '', clean_text).strip()
                     if not clean_text and item.get('title'): clean_text = item.get('title')
 
