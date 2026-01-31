@@ -91,18 +91,11 @@ class ScheduleImageGenerator:
         cursor_y = y
         bar_color = self.ACCENT_GRAY
         
-        # --- FIX START: Покращена логіка визначення кольору ---
-        # Перевіряємо і назву, і групу, ігноруючи регістр
-        check_text = (event.subject + " " + (event.group or "")).lower()
-        
-        # Перевіряємо різні варіанти написання
-        if any(variant in check_text for variant in ["підгр. 1", "підгр.1", "(підгр. 1)", "(підгр.1)", "підгрупа 1"]):
+        # Визначаємо колір залежно від підгрупи
+        if "(підгр. 1)" in event.subject or (event.group and "(підгр. 1)" in event.group):
             bar_color = self.ACCENT_BLUE
-            # print(f"DEBUG: Підгр.1 - СИНІЙ | subject='{event.subject}' group='{event.group}'")
-        elif any(variant in check_text for variant in ["підгр. 2", "підгр.2", "(підгр. 2)", "(підгр.2)", "підгрупа 2"]):
+        elif "(підгр. 2)" in event.subject or (event.group and "(підгр. 2)" in event.group):
             bar_color = self.ACCENT_ORANGE
-            # print(f"DEBUG: Підгр.2 - ПОМАРАНЧЕВИЙ | subject='{event.subject}' group='{event.group}'")
-        # ------------------------------------------------------
             
         subj_x = x + 140
         
@@ -110,12 +103,11 @@ class ScheduleImageGenerator:
         qr_reserved_space = (self.QR_SIZE + 40) if has_link else 0
         max_text_width = width - 160 - qr_reserved_space
         
-        # --- FIX START: Відновлення відображення групи в назві ---
+        # Відображення групи в назві
         display_subject = event.subject
         # Якщо в самій назві немає тексту "(підгр.", але в event.group він є - додаємо його
         if "(підгр." not in display_subject.lower() and event.group:
              display_subject += f" {event.group}"
-        # ------------------------------------------------------
         
         subject_lines = self._wrap_text(display_subject, self.font_subject, max_text_width)
         
@@ -170,7 +162,7 @@ class ScheduleImageGenerator:
         
         for key in sorted_keys:
             group = grouped_events[key]
-            group.sort(key=lambda x: x.group) 
+            group.sort(key=lambda x: x.group if x.group else "") 
             h_acc = 0
             for ev in group:
                 h_acc += self._calculate_event_block_height(ev, self.WIDTH) + 20
@@ -194,7 +186,7 @@ class ScheduleImageGenerator:
         else:
             for key in sorted_keys:
                 group = grouped_events[key]
-                group.sort(key=lambda x: x.group)
+                group.sort(key=lambda x: x.group if x.group else "")
                 slot_height = group_heights[key] - 20 
                 self._draw_time_column(draw, self.PADDING, cursor_y, slot_height, key[0], key[1])
                 sub_cursor_y = cursor_y
