@@ -93,12 +93,15 @@ class ScheduleImageGenerator:
         
         # --- FIX START: Покращена логіка визначення кольору ---
         # Перевіряємо і назву, і групу, ігноруючи регістр
-        check_text = (event.subject + " " + event.group).lower()
+        check_text = (event.subject + " " + (event.group or "")).lower()
         
-        if "підгр. 1" in check_text or "підгр.1" in check_text:
+        # Перевіряємо різні варіанти написання
+        if any(variant in check_text for variant in ["підгр. 1", "підгр.1", "(підгр. 1)", "(підгр.1)", "підгрупа 1"]):
             bar_color = self.ACCENT_BLUE
-        elif "підгр. 2" in check_text or "підгр.2" in check_text:
+            # print(f"DEBUG: Підгр.1 - СИНІЙ | subject='{event.subject}' group='{event.group}'")
+        elif any(variant in check_text for variant in ["підгр. 2", "підгр.2", "(підгр. 2)", "(підгр.2)", "підгрупа 2"]):
             bar_color = self.ACCENT_ORANGE
+            # print(f"DEBUG: Підгр.2 - ПОМАРАНЧЕВИЙ | subject='{event.subject}' group='{event.group}'")
         # ------------------------------------------------------
             
         subj_x = x + 140
