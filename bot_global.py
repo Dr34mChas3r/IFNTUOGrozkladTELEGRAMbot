@@ -70,10 +70,13 @@ class ScheduleEvent:
             text = re.sub(fr'\({escaped_type}\)', '', text, flags=re.IGNORECASE)
         if self.teacher:
             text = text.replace(self.teacher, '')
+        
+        # Видаляємо підгрупу з назви предмету (бо вона вже є в self.group завдяки парсеру)
+        text = re.sub(r'\(підгр\.\s*\d+\)', '', text)
+
         text = re.sub(r'(доцент|професор|викладач|асистент|зав\.каф\.)\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+(\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+)?', '', text)
         text = re.sub(r'(доцент|професор|викладач|асистент|зав\.каф\.)\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+\s+[A-ZА-ЯІЇЄ]\.([A-ZА-ЯІЇЄ]\.)?', '', text)
         text = re.sub(r'\d+[^\s]*\.ауд\.', '', text)
-      #  text = re.sub(r'\(підгр\.\s*\d+\)', '', text)
         text = text.replace('*', '').strip()
         text = re.sub(r'\s+', ' ', text)
         return text.strip()
@@ -454,12 +457,19 @@ class NungParser:
                     clean_text = description.replace('*', '').strip()
                     teacher_name = item.get('teacher') or ""
                     
+                    # --- ОСЬ ЦЕ ПОВЕРНУТА ЛОГІКА З РОБОЧОЇ ВЕРСІЇ ---
+                    # Ми тут визначаємо групу разом з підгрупою, додаючи пробіл
+                    group_name = item.get('object') or ""
+                    subgroup_match = re.search(r'\(підгр\.\s*(\d+)\)', clean_text)
+                    if subgroup_match: 
+                        # Це той самий рядок, який "форсує" пробіл, як у вашій старій версії
+                        group_name = f"(підгр. {subgroup_match.group(1)})"
+                    # ------------------------------------------------
+
                     if not teacher_name and obj_mode == 'group':
                         tm = re.search(r'(доцент|професор|викладач|асистент|зав\.каф\.)\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+(\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+)?', clean_text)
                         if tm: teacher_name = tm.group(0)
 
-                    group_name = item.get('object') or ""
-                    
                     is_remote = (item.get('online') in ['Tak', 'Yes', '1', 'Так', 'True']) or "дистанційно" in clean_text.lower()
                     clean_text = re.sub(r'(?i)дистанційно', '', clean_text).strip()
                     if not clean_text and item.get('title'): clean_text = item.get('title')
@@ -715,7 +725,6 @@ class ScheduleBot:
                 try: await update.callback_query.edit_message_media(media=media, reply_markup=kb)
                 except Exception as e: logger.warning(f"Edit media warning: {e}")
             else:
-                # ТУТ ОСНОВНЕ ВИПРАВЛЕННЯ: disable_notification=True
                 await update.callback_query.message.delete()
                 await update.effective_chat.send_photo(photo=bio, caption=full_caption, reply_markup=kb, parse_mode=ParseMode.HTML, disable_notification=True)
         else:
@@ -809,7 +818,6 @@ class ScheduleBot:
                 await update.callback_query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode=ParseMode.HTML)
             except Exception:
                 await update.callback_query.message.delete()
-                # ТУТ ТЕЖ: disable_notification=True
                 await update.effective_chat.send_message(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode=ParseMode.HTML, disable_notification=True)
         else:
             await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode=ParseMode.HTML)
@@ -831,11 +839,9 @@ class ScheduleBot:
                     await query.edit_message_text("🏠 Головне меню:", reply_markup=self.get_main_keyboard())
                 except:
                     await query.message.delete()
-                    # ТИХА ВІДПРАВКА
                     await query.message.chat.send_message("🏠 Головне меню:", reply_markup=self.get_main_keyboard(), disable_notification=True)
             else:
                 await query.message.delete()
-                # ТИХА ВІДПРАВКА (була картинка, став текст)
                 await query.message.chat.send_message("🏠 Головне меню:", reply_markup=self.get_main_keyboard(), disable_notification=True)
         
         elif data in ['today', 'tomorrow', 'week']: await self._generic_schedule_command(update, data)
@@ -874,7 +880,6 @@ class ScheduleBot:
             
             if self.image_generator:
                 bio = self.image_generator.create_day_image(events, target_date)
-                
                 prev_date = (target_date - timedelta(days=1)).strftime("%Y-%m-%d")
                 next_date = (target_date + timedelta(days=1)).strftime("%Y-%m-%d")
                 
@@ -888,7 +893,6 @@ class ScheduleBot:
                 if query.message.photo: await query.edit_message_media(media=InputMediaPhoto(bio, caption=f"Розклад: {obj_id}"), reply_markup=kb)
                 else:
                     await query.message.delete()
-                    # ТИХА ВІДПРАВКА
                     await query.message.chat.send_photo(photo=bio, caption=f"Розклад: {obj_id}", reply_markup=kb, disable_notification=True)
 
 def main():
