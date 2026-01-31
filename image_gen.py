@@ -3,9 +3,11 @@ from datetime import datetime, timedelta
 from io import BytesIO
 from collections import defaultdict
 from PIL import Image, ImageDraw, ImageFont
+import qrcode  # pip install qrcode[pil]
 
 class ScheduleImageGenerator:
-    def __init__(self, font_path="/usr/share/fonts/truetype/roboto/unhinted/RobotoTTF/Roboto-Regular.ttf"):
+    # ДОДАНО 'r' перед рядком шляху, щоб Windows не сварився на слеші
+    def __init__(self, font_path=r"/usr/share/fonts/truetype/roboto/unhinted/RobotoTTF/Roboto-Regular.ttf"):
         self.BG_COLOR = "#F0F2F5"
         self.TEXT_MAIN = "#000000"
         self.TEXT_SEC = "#555555"
@@ -17,6 +19,7 @@ class ScheduleImageGenerator:
 
         self.WIDTH = 1200
         self.PADDING = 40
+        self.QR_SIZE = 100
         
         try:
             self.font_header = ImageFont.truetype(font_path, 42)
@@ -24,6 +27,7 @@ class ScheduleImageGenerator:
             self.font_subject = ImageFont.truetype(font_path, 34)
             self.font_details = ImageFont.truetype(font_path, 26)
         except OSError:
+            print(f"⚠️ Шрифт не знайдено за шляхом: {font_path}. Використовую стандартний.")
             self.font_header = ImageFont.load_default()
             self.font_time = ImageFont.load_default()
             self.font_subject = ImageFont.load_default()
@@ -32,14 +36,23 @@ class ScheduleImageGenerator:
     def _wrap_text(self, text, font, max_width):
         lines = []
         if not text: return lines
-        avg_char_width = font.getlength("a") * 0.95
+        try:
+            avg_char_width = font.getlength("a") * 0.95
+        except AttributeError:
+            avg_char_width = font.getsize("a")[0] * 0.95
+            
+        if avg_char_width == 0: avg_char_width = 10
         max_chars = int(max_width / avg_char_width)
         for paragraph in text.split('\n'):
             lines.extend(textwrap.wrap(paragraph, width=max_chars))
         return lines
 
     def _calculate_event_block_height(self, event, width):
-        max_text_width = width - 160
+        has_qr = bool(event.links)
+        qr_padding = (self.QR_SIZE + 20) if has_qr else 0
+        
+        max_text_width = width - 160 - qr_padding
+        
         display_subject = event.subject
         if "(підгр." not in display_subject.lower() and event.group:
              display_subject += f" {event.group}"
@@ -57,7 +70,9 @@ class ScheduleImageGenerator:
         details_lines = self._wrap_text(details_text, self.font_details, max_text_width)
         
         height += (len(details_lines) * 35) + 15
-        return max(90, height)
+        
+        min_height = (self.QR_SIZE + 10) if has_qr else 90
+        return max(min_height, height)
 
     def _draw_time_column(self, draw, x, y, h, start_time, end_time):
         draw.rounded_rectangle([x, y, x + 110, y + h], radius=10, fill=self.TIME_BG)
@@ -67,7 +82,13 @@ class ScheduleImageGenerator:
         draw.text((x + 15, text_y), time_str_start, font=self.font_time, fill=self.TEXT_MAIN)
         draw.text((x + 15, text_y + 35), time_str_end, font=self.font_time, fill=self.TEXT_SEC)
 
-    def _draw_event_body(self, draw, x, y, width, event):
+    def _generate_qr(self, link):
+        qr = qrcode.QRCode(box_size=2, border=1)
+        qr.add_data(link)
+        qr.make(fit=True)
+        return qr.make_image(fill_color="black", back_color="white").resize((self.QR_SIZE, self.QR_SIZE))
+
+    def _draw_event_body(self, img, draw, x, y, width, event):
         cursor_y = y
         bar_color = self.ACCENT_GRAY
         grp_text = ""
@@ -80,7 +101,10 @@ class ScheduleImageGenerator:
             if "(підгр. 2)" not in event.subject: grp_text = " (підгр. 2)"
             
         subj_x = x + 140
-        max_text_width = width - 160
+        
+        has_link = bool(event.links)
+        qr_padding = (self.QR_SIZE + 20) if has_link else 0
+        max_text_width = width - 160 - qr_padding
         
         display_subject = event.subject + grp_text
         subject_lines = self._wrap_text(display_subject, self.font_subject, max_text_width)
@@ -89,6 +113,15 @@ class ScheduleImageGenerator:
         
         draw.rectangle([subj_x - 15, cursor_y + 5, subj_x - 8, cursor_y + block_height - 5], fill=bar_color)
         
+        if has_link:
+            try:
+                qr_img = self._generate_qr(event.links[0])
+                qr_x = x + width - self.QR_SIZE - 10
+                qr_y = cursor_y + 10
+                img.paste(qr_img, (int(qr_x), int(qr_y)))
+            except Exception as e:
+                print(f"QR Error: {e}")
+
         for line in subject_lines:
             draw.text((subj_x, cursor_y), line, font=self.font_subject, fill=self.TEXT_MAIN)
             cursor_y += 45
@@ -156,7 +189,7 @@ class ScheduleImageGenerator:
                 self._draw_time_column(draw, self.PADDING, cursor_y, slot_height, key[0], key[1])
                 sub_cursor_y = cursor_y
                 for ev in group:
-                    h = self._draw_event_body(draw, self.PADDING, sub_cursor_y, self.WIDTH - (self.PADDING*2), ev)
+                    h = self._draw_event_body(img, draw, self.PADDING, sub_cursor_y, self.WIDTH - (self.PADDING*2), ev)
                     sub_cursor_y += h + 20
                 cursor_y += slot_height + 40
 
