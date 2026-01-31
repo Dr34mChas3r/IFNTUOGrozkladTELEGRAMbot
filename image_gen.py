@@ -11,6 +11,7 @@ class ScheduleImageGenerator:
         self.TEXT_MAIN = "#000000"
         self.TEXT_SEC = "#555555"
         self.TIME_BG = "#E1E8ED"
+        self.CARD_BG = "#FFFFFF"  # НОВЕ: фон для карток
         
         self.ACCENT_BLUE = "#3498db"
         self.ACCENT_ORANGE = "#e67e22"
@@ -19,6 +20,7 @@ class ScheduleImageGenerator:
         self.WIDTH = 1200
         self.PADDING = 40
         self.QR_SIZE = 150
+        self.CARD_PADDING = 15  # НОВЕ: відступ всередині картки
         
         try:
             self.font_header = ImageFont.truetype(font_path, 42)
@@ -101,11 +103,10 @@ class ScheduleImageGenerator:
         
         has_link = bool(event.links)
         qr_reserved_space = (self.QR_SIZE + 40) if has_link else 0
-        max_text_width = width - 160 - qr_reserved_space
+        max_text_width = width - 160 - qr_reserved_space - (self.CARD_PADDING * 2)
         
         # Відображення групи в назві
         display_subject = event.subject
-        # Якщо в самій назві немає тексту "(підгр.", але в event.group він є - додаємо його
         if "(підгр." not in display_subject.lower() and event.group:
              display_subject += f" {event.group}"
         
@@ -113,13 +114,31 @@ class ScheduleImageGenerator:
         
         block_height = self._calculate_event_block_height(event, width)
         
-        draw.rectangle([subj_x - 15, cursor_y + 5, subj_x - 8, cursor_y + block_height - 5], fill=bar_color)
+        # Малюємо білу картку з тінню
+        card_x1 = subj_x - 25
+        card_y1 = cursor_y
+        card_x2 = x + width - 10
+        card_y2 = cursor_y + block_height
+        
+        # Тінь (зміщена на 3px)
+        draw.rounded_rectangle([card_x1 + 3, card_y1 + 3, card_x2 + 3, card_y2 + 3], 
+                              radius=12, fill="#00000015")
+        # Сама картка
+        draw.rounded_rectangle([card_x1, card_y1, card_x2, card_y2], 
+                              radius=12, fill=self.CARD_BG)
+        
+        # Кольоровий бар зліва (тепер товстіший і заокруглений)
+        draw.rounded_rectangle([subj_x - 20, cursor_y + 10, subj_x - 8, cursor_y + block_height - 10], 
+                              radius=6, fill=bar_color)
+        
+        # Додаємо внутрішній відступ
+        cursor_y += self.CARD_PADDING
         
         if has_link:
             try:
                 qr_img = self._generate_qr(event.links[0])
-                qr_x = x + width - self.QR_SIZE - 20
-                qr_y = cursor_y + 10
+                qr_x = card_x2 - self.QR_SIZE - 15
+                qr_y = cursor_y + 5
                 img.paste(qr_img, (int(qr_x), int(qr_y)))
             except Exception as e:
                 print(f"QR Error: {e}")
@@ -165,9 +184,9 @@ class ScheduleImageGenerator:
             group.sort(key=lambda x: x.group if x.group else "") 
             h_acc = 0
             for ev in group:
-                h_acc += self._calculate_event_block_height(ev, self.WIDTH) + 20
+                h_acc += self._calculate_event_block_height(ev, self.WIDTH) + 25  # Збільшено відступ
             group_heights[key] = h_acc
-            total_content_height += h_acc + 20
+            total_content_height += h_acc + 30  # Збільшено відступ між слотами
             
         final_height = max(400, 150 + total_content_height)
         
@@ -187,13 +206,13 @@ class ScheduleImageGenerator:
             for key in sorted_keys:
                 group = grouped_events[key]
                 group.sort(key=lambda x: x.group if x.group else "")
-                slot_height = group_heights[key] - 20 
+                slot_height = group_heights[key] - 25  # Оновлено
                 self._draw_time_column(draw, self.PADDING, cursor_y, slot_height, key[0], key[1])
                 sub_cursor_y = cursor_y
                 for ev in group:
                     h = self._draw_event_body(img, draw, self.PADDING, sub_cursor_y, self.WIDTH - (self.PADDING*2), ev)
-                    sub_cursor_y += h + 20
-                cursor_y += slot_height + 40
+                    sub_cursor_y += h + 25  # Збільшено відступ між парами
+                cursor_y += slot_height + 50  # Збільшено відступ між часовими слотами
 
         final_img = img.crop((0, 0, self.WIDTH, cursor_y + self.PADDING))
         bio = BytesIO()
