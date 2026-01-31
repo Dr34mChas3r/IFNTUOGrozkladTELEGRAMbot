@@ -457,14 +457,24 @@ class NungParser:
                     clean_text = description.replace('*', '').strip()
                     teacher_name = item.get('teacher') or ""
                     
-                    # --- ОСЬ ЦЕ ПОВЕРНУТА ЛОГІКА З РОБОЧОЇ ВЕРСІЇ ---
-                    # Ми тут визначаємо групу разом з підгрупою, додаючи пробіл
-                    group_name = item.get('object') or ""
-                    subgroup_match = re.search(r'\(підгр\.\s*(\d+)\)', clean_text)
-                    if subgroup_match: 
-                        # Це той самий рядок, який "форсує" пробіл, як у вашій старій версії
-                        group_name = f"(підгр. {subgroup_match.group(1)})"
-                    # ------------------------------------------------
+                    # Визначаємо групу та підгрупу
+                    # Для режиму separated підгрупа приходить в окремому полі 'group'
+                    base_group = item.get('object') or ""
+                    subgroup_info = item.get('group') or ""  # Тут буде "(підгр. 1)" або "(підгр. 2)"
+                    
+                    # Формуємо повну назву групи
+                    if obj_mode == 'group':
+                        # Для режиму group об'єднуємо назву групи + підгрупу
+                        group_name = f"{base_group} {subgroup_info}".strip() if subgroup_info else base_group
+                    else:
+                        # Для режимів teacher/room - використовуємо base_group або шукаємо в тексті
+                        group_name = base_group
+                        if not group_name:
+                            gm = re.search(r'([A-ZА-ЯІЇЄ]{2,4}-\d{2}-\d)', clean_text)
+                            if gm: group_name = gm.group(0)
+                        # Додаємо підгрупу якщо є
+                        if subgroup_info:
+                            group_name = f"{group_name} {subgroup_info}".strip()
 
                     if not teacher_name and obj_mode == 'group':
                         tm = re.search(r'(доцент|професор|викладач|асистент|зав\.каф\.)\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+(\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+)?', clean_text)
