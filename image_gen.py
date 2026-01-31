@@ -6,7 +6,6 @@ from PIL import Image, ImageDraw, ImageFont
 import qrcode  # pip install qrcode[pil]
 
 class ScheduleImageGenerator:
-    # 1. Повернуто Linux шлях
     def __init__(self, font_path="/usr/share/fonts/truetype/roboto/unhinted/RobotoTTF/Roboto-Regular.ttf"):
         self.BG_COLOR = "#F0F2F5"
         self.TEXT_MAIN = "#000000"
@@ -19,7 +18,6 @@ class ScheduleImageGenerator:
 
         self.WIDTH = 1200
         self.PADDING = 40
-        # 2. QR SIZE = 150
         self.QR_SIZE = 150
         
         try:
@@ -28,7 +26,6 @@ class ScheduleImageGenerator:
             self.font_subject = ImageFont.truetype(font_path, 34)
             self.font_details = ImageFont.truetype(font_path, 26)
         except OSError:
-            print(f"⚠️ Шрифт не знайдено за шляхом: {font_path}. Використовую стандартний.")
             self.font_header = ImageFont.load_default()
             self.font_time = ImageFont.load_default()
             self.font_subject = ImageFont.load_default()
@@ -48,30 +45,16 @@ class ScheduleImageGenerator:
             lines.extend(textwrap.wrap(paragraph, width=max_chars))
         return lines
 
-    # Допоміжний метод для визначення тексту підгрупи (щоб логіка була однакова всюди)
-    def _get_subgroup_info(self, event):
-        grp_text = ""
-        is_accented = False
-        # 3. Відновлено стару логіку перевірки підгруп
-        if "(підгр. 1)" in event.subject or "(підгр. 1)" in event.group:
-            is_accented = True
-            if "(підгр. 1)" not in event.subject: grp_text = " (підгр. 1)"
-        elif "(підгр. 2)" in event.subject or "(підгр. 2)" in event.group:
-            is_accented = True
-            if "(підгр. 2)" not in event.subject: grp_text = " (підгр. 2)"
-        return grp_text, is_accented
-
     def _calculate_event_block_height(self, event, width):
         has_qr = bool(event.links)
-        # Резервуємо місце під QR (150 + 50 відступ)
-        qr_reserved_space = (self.QR_SIZE + 50) if has_qr else 0
         
-        # 140 - це відступ зліва (час + смужка)
-        max_text_width = width - 140 - qr_reserved_space
+        # ВИПРАВЛЕНО: більше відступу для тексту, якщо є QR
+        qr_reserved_space = (self.QR_SIZE + 40) if has_qr else 0
+        max_text_width = width - 160 - qr_reserved_space
         
-        # Визначаємо повний текст предмету так само, як при малюванні
-        grp_text, _ = self._get_subgroup_info(event)
-        display_subject = event.subject + grp_text
+        display_subject = event.subject
+        if "(підгр." not in display_subject.lower() and event.group:
+             display_subject += f" {event.group}"
 
         subject_lines = self._wrap_text(display_subject, self.font_subject, max_text_width)
         height = (len(subject_lines) * 45) + 5
@@ -87,7 +70,6 @@ class ScheduleImageGenerator:
         
         height += (len(details_lines) * 35) + 15
         
-        # Мінімальна висота блоку має бути не менша за QR код
         min_height = (self.QR_SIZE + 20) if has_qr else 90
         return max(min_height, height)
 
@@ -103,42 +85,37 @@ class ScheduleImageGenerator:
         qr = qrcode.QRCode(box_size=2, border=1)
         qr.add_data(link)
         qr.make(fit=True)
-        # QR_SIZE тепер 150
         return qr.make_image(fill_color="black", back_color="white").resize((self.QR_SIZE, self.QR_SIZE))
 
     def _draw_event_body(self, img, draw, x, y, width, event):
         cursor_y = y
-        
-        # Визначаємо колір і текст підгрупи
-        grp_text, is_accented = self._get_subgroup_info(event)
-        
         bar_color = self.ACCENT_GRAY
-        if is_accented:
-            if "(підгр. 1)" in grp_text or "(підгр. 1)" in event.subject:
-                bar_color = self.ACCENT_BLUE
-            elif "(підгр. 2)" in grp_text or "(підгр. 2)" in event.subject:
-                bar_color = self.ACCENT_ORANGE
+        grp_text = ""
+        
+        if "(підгр. 1)" in event.subject or "(підгр. 1)" in event.group:
+            bar_color = self.ACCENT_BLUE
+            if "(підгр. 1)" not in event.subject: grp_text = " (підгр. 1)"
+        elif "(підгр. 2)" in event.subject or "(підгр. 2)" in event.group:
+            bar_color = self.ACCENT_ORANGE
+            if "(підгр. 2)" not in event.subject: grp_text = " (підгр. 2)"
             
         subj_x = x + 140
         
         has_link = bool(event.links)
-        # Такий самий відступ, як у розрахунку висоти
-        qr_reserved_space = (self.QR_SIZE + 50) if has_link else 0
-        max_text_width = width - 140 - qr_reserved_space
+        qr_reserved_space = (self.QR_SIZE + 40) if has_link else 0
+        max_text_width = width - 160 - qr_reserved_space
         
         display_subject = event.subject + grp_text
         subject_lines = self._wrap_text(display_subject, self.font_subject, max_text_width)
         
         block_height = self._calculate_event_block_height(event, width)
         
-        # Малюємо кольорову смужку
         draw.rectangle([subj_x - 15, cursor_y + 5, subj_x - 8, cursor_y + block_height - 5], fill=bar_color)
         
         if has_link:
             try:
                 qr_img = self._generate_qr(event.links[0])
-                # Позиціонування QR (20px від правого краю)
-                qr_x = x + width - self.QR_SIZE - 20 
+                qr_x = x + width - self.QR_SIZE - 20
                 qr_y = cursor_y + 10
                 img.paste(qr_img, (int(qr_x), int(qr_y)))
             except Exception as e:
@@ -182,8 +159,7 @@ class ScheduleImageGenerator:
         
         for key in sorted_keys:
             group = grouped_events[key]
-            # Сортуємо, щоб підгрупа 1 була вище підгрупи 2
-            group.sort(key=lambda x: x.group if x.group else x.subject) 
+            group.sort(key=lambda x: x.group) 
             h_acc = 0
             for ev in group:
                 h_acc += self._calculate_event_block_height(ev, self.WIDTH) + 20
@@ -207,7 +183,7 @@ class ScheduleImageGenerator:
         else:
             for key in sorted_keys:
                 group = grouped_events[key]
-                group.sort(key=lambda x: x.group if x.group else x.subject)
+                group.sort(key=lambda x: x.group)
                 slot_height = group_heights[key] - 20 
                 self._draw_time_column(draw, self.PADDING, cursor_y, slot_height, key[0], key[1])
                 sub_cursor_y = cursor_y
