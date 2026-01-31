@@ -48,11 +48,11 @@ class ScheduleImageGenerator:
     def _calculate_event_block_height(self, event, width):
         has_qr = bool(event.links)
         
-        # ВИПРАВЛЕНО: більше відступу для тексту, якщо є QR
         qr_reserved_space = (self.QR_SIZE + 40) if has_qr else 0
         max_text_width = width - 160 - qr_reserved_space
         
         display_subject = event.subject
+        # Логіка додавання групи до назви для розрахунку висоти
         if "(підгр." not in display_subject.lower() and event.group:
              display_subject += f" {event.group}"
 
@@ -90,14 +90,16 @@ class ScheduleImageGenerator:
     def _draw_event_body(self, img, draw, x, y, width, event):
         cursor_y = y
         bar_color = self.ACCENT_GRAY
-        grp_text = ""
         
-        if "(підгр. 1)" in event.subject or "(підгр. 1)" in event.group:
+        # --- FIX START: Покращена логіка визначення кольору ---
+        # Перевіряємо і назву, і групу, ігноруючи регістр
+        check_text = (event.subject + " " + event.group).lower()
+        
+        if "підгр. 1" in check_text or "підгр.1" in check_text:
             bar_color = self.ACCENT_BLUE
-            if "(підгр. 1)" not in event.subject: grp_text = " (підгр. 1)"
-        elif "(підгр. 2)" in event.subject or "(підгр. 2)" in event.group:
+        elif "підгр. 2" in check_text or "підгр.2" in check_text:
             bar_color = self.ACCENT_ORANGE
-            if "(підгр. 2)" not in event.subject: grp_text = " (підгр. 2)"
+        # ------------------------------------------------------
             
         subj_x = x + 140
         
@@ -105,7 +107,13 @@ class ScheduleImageGenerator:
         qr_reserved_space = (self.QR_SIZE + 40) if has_link else 0
         max_text_width = width - 160 - qr_reserved_space
         
-        display_subject = event.subject + grp_text
+        # --- FIX START: Відновлення відображення групи в назві ---
+        display_subject = event.subject
+        # Якщо в самій назві немає тексту "(підгр.", але в event.group він є - додаємо його
+        if "(підгр." not in display_subject.lower() and event.group:
+             display_subject += f" {event.group}"
+        # ------------------------------------------------------
+        
         subject_lines = self._wrap_text(display_subject, self.font_subject, max_text_width)
         
         block_height = self._calculate_event_block_height(event, width)
