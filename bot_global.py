@@ -623,8 +623,39 @@ class ScheduleBot:
             if not events: continue
             if self.image_generator:
                 photo_bio = self.image_generator.create_day_image(events, today)
+                
+                # Формуємо caption з посиланнями
+                subject_links = {} 
+                for e in events:
+                    if not e.links: continue
+                    for link in e.links:
+                        if e.subject not in subject_links: subject_links[e.subject] = {}
+                        if link not in subject_links[e.subject]: subject_links[e.subject][link] = []
+                        subject_links[e.subject][link].append(e.start_time)
+
+                links_text_lines = []
+                for subject, links_data in subject_links.items():
+                    if len(links_data) == 1:
+                        link = list(links_data.keys())[0]
+                        link_name = "Zoom/Meet"
+                        if "zoom" in link: link_name = "Zoom 🎥"
+                        elif "meet" in link: link_name = "Meet 🎥"
+                        links_text_lines.append(f"📚 {subject}: <a href=\"{link}\">{link_name}</a>")
+                    else:
+                        for link, times in links_data.items():
+                            link_name = "Zoom/Meet"
+                            if "zoom" in link: link_name = "Zoom 🎥"
+                            elif "meet" in link: link_name = "Meet 🎥"
+                            time_strs = [t.strftime("%H:%M") for t in times]
+                            time_str = ", ".join(time_strs)
+                            links_text_lines.append(f"📚 {subject} ({time_str}): <a href=\"{link}\">{link_name}</a>")
+
+                caption = f"📅 Сьогодні: {s.group_name}"
+                if links_text_lines: 
+                    caption += "\n\n🔗 <b>Посилання:</b>\n" + "\n".join(links_text_lines)
+                
                 try: 
-                    msg = await context.bot.send_photo(chat_id=chat_id, photo=photo_bio, caption=f"📅 Сьогодні: {s.group_name}")
+                    msg = await context.bot.send_photo(chat_id=chat_id, photo=photo_bio, caption=caption, parse_mode=ParseMode.HTML)
                     await self._pin_message_with_management(context, chat_id, msg.message_id)
                 except Exception as e: logger.error(f"Daily error: {e}")
 
