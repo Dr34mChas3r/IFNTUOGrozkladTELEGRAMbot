@@ -777,6 +777,13 @@ class ScheduleBot:
 
     # --- Commands ---
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        # --- ПОЧАТОК ЗМІН ---
+        # Якщо є аргументи (наприклад, перейшли за посиланням ?start=KI-24-1)
+        if context.args:
+            await self.group_command(update, context)
+            return
+        # --- КІНЕЦЬ ЗМІН ---
+
         s = self.user_manager.get_user_settings(update.effective_chat.id)
         msg = f"👋 Привіт!\n"
         if s.group_name: msg += f"✅ Група: <b>{s.group_name}</b>\n"
