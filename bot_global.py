@@ -41,6 +41,38 @@ WEEKLY_NOTIFICATION_DAY = 0
 SCHEDULE_CHECK_INTERVAL = 30 * 60
 MAX_PINNED_MESSAGES = 5
 
+# Стандартні часи пар
+PAIR_TIMES = {
+    1: ("08:00", "09:20"),
+    2: ("09:30", "10:50"),
+    3: ("11:00", "12:20"),
+    4: ("12:30", "13:50"),
+    5: ("14:00", "15:20"),
+    6: ("15:30", "16:50"),
+    7: ("17:00", "18:20"),
+    8: ("18:30", "19:50")
+}
+
+# Емодзі для номерів пар
+PAIR_EMOJIS = {
+    1: "1️⃣",
+    2: "2️⃣", 
+    3: "3️⃣",
+    4: "4️⃣",
+    5: "5️⃣",
+    6: "6️⃣",
+    7: "7️⃣",
+    8: "8️⃣"
+}
+
+def get_pair_number(start_time) -> int:
+    """Визначає номер пари за часом початку"""
+    time_str = start_time.strftime("%H:%M")
+    for pair_num, (start, end) in PAIR_TIMES.items():
+        if time_str == start:
+            return pair_num
+    return 0
+
 # --- Enums & Classes ---
 
 class ChangeType(Enum):
@@ -625,34 +657,91 @@ class ScheduleBot:
                 photo_bio = self.image_generator.create_day_image(events, today)
                 
                 # Формуємо caption з посиланнями
+                # Збираємо інформацію про події з посиланнями
                 subject_links = {} 
                 for e in events:
                     if not e.links: continue
                     for link in e.links:
-                        if e.subject not in subject_links: subject_links[e.subject] = {}
-                        if link not in subject_links[e.subject]: subject_links[e.subject][link] = []
-                        subject_links[e.subject][link].append(e.start_time)
+                        key = (e.subject, e.group)  # Використовуємо tuple (предмет, група/підгрупа)
+                        if key not in subject_links: subject_links[key] = {}
+                        if link not in subject_links[key]: subject_links[key][link] = []
+                        subject_links[key][link].append(e.start_time)
 
+                # Групуємо по часу початку для красивого виводу
+                time_grouped = {}
+                for (subject, group), links_data in subject_links.items():
+                    for link, times in links_data.items():
+                        for start_time in times:
+                            time_key = start_time.strftime("%H:%M")
+                            if time_key not in time_grouped:
+                                time_grouped[time_key] = []
+                            time_grouped[time_key].append({
+                                'subject': subject,
+                                'group': group,
+                                'link': link,
+                                'start_time': start_time
+                            })
+
+                # Сортуємо по часу
+                sorted_times = sorted(time_grouped.keys())
+                
                 links_text_lines = []
-                for subject, links_data in subject_links.items():
-                    if len(links_data) == 1:
-                        link = list(links_data.keys())[0]
-                        link_name = "Zoom/Meet"
-                        if "zoom" in link: link_name = "Zoom 🎥"
-                        elif "meet" in link: link_name = "Meet 🎥"
-                        links_text_lines.append(f"📚 {subject}: <a href=\"{link}\">{link_name}</a>")
-                    else:
-                        for link, times in links_data.items():
-                            link_name = "Zoom/Meet"
-                            if "zoom" in link: link_name = "Zoom 🎥"
-                            elif "meet" in link: link_name = "Meet 🎥"
-                            time_strs = [t.strftime("%H:%M") for t in times]
-                            time_str = ", ".join(time_strs)
-                            links_text_lines.append(f"📚 {subject} ({time_str}): <a href=\"{link}\">{link_name}</a>")
+                for time_key in sorted_times:
+                    items = time_grouped[time_key]
+                    # Визначаємо номер пари
+                    pair_num = get_pair_number(items[0]['start_time'])
+                    pair_emoji = PAIR_EMOJIS.get(pair_num, "📚")
+                    
+                    # Рахуємо дублікати предметів ТІЛЬКИ в межах цього часу
+                    time_subject_count = {}
+                    for item in items:
+                        subj = item['subject']
+                        time_subject_count[subj] = time_subject_count.get(subj, 0) + 1
+                    
+                    for idx, item in enumerate(items):
+                        subject = item['subject']
+                        group = item['group']
+                        link = item['link']
+                        
+                        # Визначаємо чи потрібно додавати групу - тільки якщо предмет повторюється в цей час
+                        subject_display = subject
+                        if time_subject_count[subject] > 1 and group:
+                            subject_display = f"{subject} {group}"
+                        
+                        link_name = "Meet 🎥" if "meet" in link else ("Zoom 🎥" if "zoom" in link else "🔗")
+                        
+                        # Перший елемент цього часу - з емодзі номера
+                        # Інші - з відступом
+                        if idx == 0:
+                            links_text_lines.append(f"{pair_emoji} {subject_display}: <a href=\"{link}\">{link_name}</a>")
+                        else:
+                            links_text_lines.append(f"{'   '} {subject_display}: <a href=\"{link}\">{link_name}</a>")
 
                 caption = f"📅 Сьогодні: {s.group_name}"
                 if links_text_lines: 
-                    caption += "\n\n🔗 <b>Посилання:</b>\n" + "\n".join(links_text_lines)
+                    caption += "\n\n🔗 <b>Посилання на пари:</b>\n" + "\n".join(links_text_lines)
+                
+                # Додаємо секцію з іншими посиланнями (документи, матеріали тощо)
+                other_links = []
+                for e in events:
+                    if not e.links: continue
+                    for link in e.links:
+                        # Пропускаємо посилання на конференції
+                        if any(x in link.lower() for x in ['zoom.us', 'meet.google', 'teams.microsoft', 'webex']):
+                            continue
+                        # Визначаємо номер пари
+                        pair_num = get_pair_number(e.start_time)
+                        pair_emoji = PAIR_EMOJIS.get(pair_num, "📎")
+                        
+                        # Скорочуємо назву предмету якщо вона дуже довга
+                        subject_short = e.subject[:30] + "..." if len(e.subject) > 30 else e.subject
+                        if e.group and len(events) > 1:
+                            subject_short = f"{subject_short} {e.group}"
+                        
+                        other_links.append(f"{pair_emoji} {subject_short}: <a href=\"{link}\">📄 Матеріали</a>")
+                
+                if other_links:
+                    caption += "\n\n📚 <b>Додаткові матеріали:</b>\n" + "\n".join(other_links)
                 
                 try: 
                     msg = await context.bot.send_photo(chat_id=chat_id, photo=photo_bio, caption=caption, parse_mode=ParseMode.HTML)
@@ -718,34 +807,91 @@ class ScheduleBot:
         if mode == 'week': bio = self.image_generator.create_week_image(events, date_obj)
         else: bio = self.image_generator.create_day_image(events, date_obj)
 
+        # Збираємо інформацію про події з посиланнями
         subject_links = {} 
         for e in events:
             if not e.links: continue
             for link in e.links:
-                if e.subject not in subject_links: subject_links[e.subject] = {}
-                if link not in subject_links[e.subject]: subject_links[e.subject][link] = []
-                subject_links[e.subject][link].append(e.start_time)
+                key = (e.subject, e.group)  # Використовуємо tuple (предмет, група/підгрупа)
+                if key not in subject_links: subject_links[key] = {}
+                if link not in subject_links[key]: subject_links[key][link] = []
+                subject_links[key][link].append(e.start_time)
 
+        # Групуємо по часу початку для красивого виводу
+        time_grouped = {}
+        for (subject, group), links_data in subject_links.items():
+            for link, times in links_data.items():
+                for start_time in times:
+                    time_key = start_time.strftime("%d.%m %H:%M")
+                    if time_key not in time_grouped:
+                        time_grouped[time_key] = []
+                    time_grouped[time_key].append({
+                        'subject': subject,
+                        'group': group,
+                        'link': link,
+                        'start_time': start_time
+                    })
+
+        # Сортуємо по часу
+        sorted_times = sorted(time_grouped.keys())
+        
         links_text_lines = []
-        for subject, links_data in subject_links.items():
-            if len(links_data) == 1:
-                link = list(links_data.keys())[0]
-                link_name = "Zoom/Meet"
-                if "zoom" in link: link_name = "Zoom 🎥"
-                elif "meet" in link: link_name = "Meet 🎥"
-                links_text_lines.append(f"📚 {subject}: <a href=\"{link}\">{link_name}</a>")
-            else:
-                for link, times in links_data.items():
-                    link_name = "Zoom/Meet"
-                    if "zoom" in link: link_name = "Zoom 🎥"
-                    elif "meet" in link: link_name = "Meet 🎥"
-                    time_strs = [t.strftime("%d.%m %H:%M") for t in times]
-                    time_str = ", ".join(time_strs)
-                    links_text_lines.append(f"📚 {subject} ({time_str}): <a href=\"{link}\">{link_name}</a>")
+        for time_key in sorted_times:
+            items = time_grouped[time_key]
+            # Визначаємо номер пари
+            pair_num = get_pair_number(items[0]['start_time'])
+            pair_emoji = PAIR_EMOJIS.get(pair_num, "📚")
+            
+            # Рахуємо дублікати предметів ТІЛЬКИ в межах цього часу
+            time_subject_count = {}
+            for item in items:
+                subj = item['subject']
+                time_subject_count[subj] = time_subject_count.get(subj, 0) + 1
+            
+            for idx, item in enumerate(items):
+                subject = item['subject']
+                group = item['group']
+                link = item['link']
+                
+                # Визначаємо чи потрібно додавати групу - тільки якщо предмет повторюється в цей час
+                subject_display = subject
+                if time_subject_count[subject] > 1 and group:
+                    subject_display = f"{subject} {group}"
+                
+                link_name = "Meet 🎥" if "meet" in link else ("Zoom 🎥" if "zoom" in link else "🔗")
+                
+                # Перший елемент цього часу - з емодзі номера
+                # Інші - з відступом
+                if idx == 0:
+                    links_text_lines.append(f"{pair_emoji} {subject_display}: <a href=\"{link}\">{link_name}</a>")
+                else:
+                    links_text_lines.append(f"{'   '} {subject_display}: <a href=\"{link}\">{link_name}</a>")
 
         full_caption = caption
         if links_text_lines: 
-            full_caption += "\n\n🔗 <b>Посилання:</b>\n" + "\n".join(links_text_lines)
+            full_caption += "\n\n🔗 <b>Посилання на пари:</b>\n" + "\n".join(links_text_lines)
+        
+        # Додаємо секцію з іншими посиланнями (документи, матеріали тощо)
+        other_links = []
+        for e in events:
+            if not e.links: continue
+            for link in e.links:
+                # Пропускаємо посилання на конференції
+                if any(x in link.lower() for x in ['zoom.us', 'meet.google', 'teams.microsoft', 'webex']):
+                    continue
+                # Визначаємо номер пари
+                pair_num = get_pair_number(e.start_time)
+                pair_emoji = PAIR_EMOJIS.get(pair_num, "📎")
+                
+                # Скорочуємо назву предмету якщо вона дуже довга
+                subject_short = e.subject[:30] + "..." if len(e.subject) > 30 else e.subject
+                if e.group and len(events) > 1:
+                    subject_short = f"{subject_short} {e.group}"
+                
+                other_links.append(f"{pair_emoji} {subject_short}: <a href=\"{link}\">📄 Матеріали</a>")
+        
+        if other_links:
+            full_caption += "\n\n📚 <b>Додаткові матеріали:</b>\n" + "\n".join(other_links)
         
         prev_date = (date_obj - timedelta(days=1)).strftime("%Y-%m-%d")
         next_date = (date_obj + timedelta(days=1)).strftime("%Y-%m-%d")
