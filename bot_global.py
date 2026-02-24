@@ -41,16 +41,16 @@ WEEKLY_NOTIFICATION_DAY = 0
 SCHEDULE_CHECK_INTERVAL = 30 * 60
 MAX_PINNED_MESSAGES = 5
 
-# Стандартні часи пар
+# Точний розклад дзвінків
 PAIR_TIMES = {
     1: ("08:00", "09:20"),
     2: ("09:30", "10:50"),
     3: ("11:00", "12:20"),
-    4: ("12:30", "13:50"),
-    5: ("14:00", "15:20"),
-    6: ("15:30", "16:50"),
-    7: ("17:00", "18:20"),
-    8: ("18:30", "19:50")
+    4: ("12:50", "14:10"),
+    5: ("14:20", "15:40"),
+    6: ("15:50", "17:10"),
+    7: ("17:20", "18:40"),
+    8: ("18:50", "20:10")
 }
 
 # Емодзі для номерів пар
@@ -103,7 +103,7 @@ class ScheduleEvent:
         if self.teacher:
             text = text.replace(self.teacher, '')
         
-        # Видаляємо підгрупу з назви предмету (бо вона вже є в self.group завдяки парсеру)
+        # Видаляємо підгрупу з назви предмету
         text = re.sub(r'\(підгр\.\s*\d+\)', '', text)
 
         text = re.sub(r'(доцент|професор|викладач|асистент|зав\.каф\.)\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+(\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+)?', '', text)
@@ -350,7 +350,7 @@ class NungParser:
         except: return []
     
     @staticmethod
-    def _fetch_links_data(group_name: str) -> List[Dict]:
+    def _fetch_links_data(group_name: str, start_date: date, end_date: date) -> List[Dict]:
         links_data = []
         if not group_name: return links_data
         
@@ -364,7 +364,8 @@ class NungParser:
             payload = {
                 'n': '700', 'faculty': '0', 'teacher': '', 'course': '0',
                 'group': group_name.encode('windows-1251'), 
-                'sdate': '', 'edate': ''
+                'sdate': start_date.strftime('%d.%m.%Y'), 
+                'edate': end_date.strftime('%d.%m.%Y')
             }
             
             response = requests.post(NungParser.HTML_URL, data=payload, headers=headers, timeout=8)
@@ -379,12 +380,42 @@ class NungParser:
                 if not any(x in url for x in ['google.com', 'zoom.us', 'teams', 'webex']):
                     continue
 
-                # Дістаємо весь текст з батьківської комірки (<td>), щоб мати назву предмета і тип пари
-                parent = link_div.find_parent('td')
-                if not parent: parent = link_div.parent
+                text_chunks = []
+                curr = link_div.previous_sibling
+                while curr:
+                    if curr.name == 'div' and 'link' in curr.get('class', []):
+                        break
+                    if isinstance(curr, str):
+                        text_chunks.append(curr.strip())
+                    elif curr.name not in ['br', 'img']:
+                        text_chunks.append(curr.get_text(separator=' ', strip=True))
+                    curr = curr.previous_sibling
                 
-                text_content = parent.get_text(separator=' ', strip=True)
-                links_data.append({'url': url, 'text': text_content})
+                isolated_text = " ".join(reversed(text_chunks)).strip()
+
+                date_str, time_str = "", ""
+                try:
+                    table = link_div.find_parent('table')
+                    if table:
+                        h4 = table.find_previous('h4')
+                        if h4:
+                            date_match = re.search(r'\d{2}\.\d{2}\.\d{4}', h4.get_text())
+                            if date_match: date_str = date_match.group(0)
+                    
+                    tr = link_div.find_parent('tr')
+                    if tr:
+                        tds = tr.find_all('td')
+                        if len(tds) >= 2:
+                            time_match = re.search(r'\d{2}:\d{2}', tds[1].get_text(separator=' '))
+                            if time_match: time_str = time_match.group(0)
+                except Exception: pass
+                
+                links_data.append({
+                    'url': url,
+                    'text': isolated_text,
+                    'date': date_str,
+                    'time': time_str
+                })
                         
         except Exception as e:
             logger.error(f"HTML Link Parsing Error: {e}")
@@ -394,12 +425,11 @@ class NungParser:
     @staticmethod
     def get_schedule(obj_id: str, start_date: date = None, end_date: date = None, obj_type: str = 'group', group_name: str = None) -> List[ScheduleEvent]:
         if not start_date: start_date = datetime.now(TIMEZONE).date() - timedelta(days=1)
-        # 180 днів для отримання розкладу до кінця семестру за замовчуванням
         if not end_date: end_date = datetime.now(TIMEZONE).date() + timedelta(days=180)
         
         links_data = []
         if obj_type == 'group' and group_name:
-            links_data = NungParser._fetch_links_data(group_name)
+            links_data = NungParser._fetch_links_data(group_name, start_date, end_date)
 
         return NungParser.get_schedule_json(obj_id, obj_type, start_date, end_date, links_data)
 
@@ -478,11 +508,9 @@ class NungParser:
                     clean_text = description.replace('*', '').strip()
                     teacher_name = item.get('teacher') or ""
                     
-                    # Визначаємо групу та підгрупу
                     base_group = item.get('object') or ""
                     subgroup_info = item.get('group') or "" 
                     
-                    # Формуємо повну назву групи
                     if obj_mode == 'group':
                         group_name = f"{base_group} {subgroup_info}".strip() if subgroup_info else base_group
                     else:
@@ -502,37 +530,62 @@ class NungParser:
                     if not clean_text and item.get('title'): clean_text = item.get('title')
 
                     final_links = []
-                    if json_link:
-                        final_links.append(json_link)
                     
-                    if not final_links and links_data and teacher_name:
-                        # Шукаємо збіги за прізвищем, предметом та типом
-                        norm_teacher = NungParser._normalize(teacher_name.split()[0])
-                        norm_subject = NungParser._normalize(clean_text)
+                    if links_data and teacher_name:
+                        event_date_str = start_dt.strftime('%d.%m.%Y')
+                        event_time_str = start_dt.strftime('%H:%M')
+                        
+                        cell_links = [ld for ld in links_data if ld['date'] == event_date_str and ld['time'] == event_time_str]
+                        if not cell_links: 
+                            cell_links = links_data
+                        
+                        # Відрізаємо звання (доцент, професор), щоб шукати тільки за прізвищем!
+                        clean_teacher = re.sub(r'(?i)(доцент|професор|викладач|асистент|зав\.каф\.)', '', teacher_name).strip()
+                        norm_teacher = NungParser._normalize(clean_teacher.split()[0]) if clean_teacher else ""
+                        
+                        # Розбиваємо предмет на слова ДО нормалізації, щоб шукати точні збіги
+                        subj_words = [NungParser._normalize(w) for w in clean_text.split() if len(NungParser._normalize(w)) > 3]
                         
                         best_match_link = None
-                        best_score = 0
+                        best_score = -1
                         
-                        for ld in links_data:
+                        for ld in cell_links:
                             norm_cell = NungParser._normalize(ld['text'])
-                            if norm_teacher in norm_cell:
-                                score = 1
-                                subj_words = [w for w in norm_subject.split() if len(w) > 3]
-                                for w in subj_words:
-                                    if w in norm_cell:
-                                        score += 1
+                            score = 0
+                            
+                            # +5 за точний збіг ПРІЗВИЩА
+                            if norm_teacher and norm_teacher in norm_cell:
+                                score += 5
+                            
+                            # +2 за кожне слово з назви предмета
+                            for w in subj_words:
+                                if w in norm_cell:
+                                    score += 2
                                 
-                                if event_type:
-                                    norm_type = NungParser._normalize(event_type)
-                                    if norm_type in norm_cell:
-                                        score += 2 # Більша вага за точний збіг типу
+                            # +3 за правильний тип заняття (Л/Лаб/Пр)
+                            if event_type:
+                                norm_type = NungParser._normalize(event_type)
+                                if norm_type in norm_cell: 
+                                    score += 3
                                 
-                                if score > best_score:
-                                    best_score = score
-                                    best_match_link = ld['url']
+                            # СТРОГА ПЕРЕВІРКА ПІДГРУПИ
+                            subg_match = re.search(r'підгр\.\s*(\d+)', group_name.lower()) or re.search(r'підгр\.\s*(\d+)', subgroup_info.lower())
+                            if subg_match:
+                                subg_num = subg_match.group(1)
+                                if f"підгр. {subg_num}" in ld['text'].lower() or f"підгр.{subg_num}" in ld['text'].lower() or f"({subg_num})" in norm_cell:
+                                    score += 15 # +15 якщо це наша підгрупа
+                                elif "підгр" in ld['text'].lower() or re.search(r'\(\d\)', norm_cell):
+                                    score -= 20 # Жорсткий штраф, якщо це посилання іншої підгрупи
+                            
+                            if score > best_score and score > 0:
+                                best_score = score
+                                best_match_link = ld['url']
                                     
                         if best_match_link:
                             final_links.append(best_match_link)
+
+                    if not final_links and json_link:
+                        final_links.append(json_link)
 
                     event_data = {
                         'subject': clean_text, 'type': event_type, 'teacher': teacher_name, 
@@ -622,7 +675,6 @@ class ScheduleBot:
         except: return False
 
     def _get_events(self, group_id: str, group_name: str = None, start_date: date = None, end_date: date = None) -> List[ScheduleEvent]:
-        # Передаємо дати, щоб парсер не тягнув зайвого, коли ми просимо лише один день
         return NungParser.get_schedule(group_id, start_date=start_date, end_date=end_date, obj_type='group', group_name=group_name)
 
     async def _pin_message_with_management(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int):
@@ -660,14 +712,12 @@ class ScheduleBot:
             s = self.user_manager.get_user_settings(chat_id)
             if not s.group_id: continue
             
-            # ОПТИМІЗАЦІЯ: Тягнемо розклад лише на сьогодні
             events = NungParser.get_schedule(s.group_id, start_date=today, end_date=today, group_name=s.group_name)
             if not events: continue
             
             if self.image_generator:
                 photo_bio = self.image_generator.create_day_image(events, today)
                 
-                # Збираємо інформацію про події з посиланнями
                 subject_links = {} 
                 for e in events:
                     if not e.links: continue
@@ -677,7 +727,6 @@ class ScheduleBot:
                         if link not in subject_links[key]: subject_links[key][link] = []
                         subject_links[key][link].append(e.start_time)
 
-                # Групуємо по часу початку для красивого виводу
                 time_grouped = {}
                 for (subject, group), links_data in subject_links.items():
                     for link, times in links_data.items():
@@ -692,7 +741,6 @@ class ScheduleBot:
                                 'start_time': start_time
                             })
 
-                # Сортуємо по часу
                 sorted_times = sorted(time_grouped.keys())
                 
                 links_text_lines = []
@@ -758,7 +806,6 @@ class ScheduleBot:
                 if s.group_id and s.change_notifications: 
                     active_groups[s.group_id] = s.group_name
             
-            # Перевіряємо весь розклад (180 днів підтягнуться за замовчуванням з get_schedule)
             for group_id, group_name in active_groups.items():
                 new_events = NungParser.get_schedule(group_id, obj_type='group', group_name=group_name)
                 
@@ -920,7 +967,6 @@ class ScheduleBot:
         
         if mode == 'week': target_date = target_date - timedelta(days=target_date.weekday())
 
-        # Визначаємо точне вікно дат для парсера, щоб швидко завантажувалось
         if mode == 'week':
             fetch_start = target_date
             fetch_end = target_date + timedelta(days=6)
@@ -975,7 +1021,6 @@ class ScheduleBot:
         if not context.args: return await update.message.reply_text("🔍 Приклад: `/search Математика`", parse_mode=ParseMode.MARKDOWN)
         
         query = " ".join(context.args)
-        # Оскільки тут потрібен пошук на майбутнє, тягнемо стандартні 180 днів
         events = self._get_events(s.group_id, s.group_name)
         found = [e for e in events if e.matches_query(query) and e.start_time.date() >= datetime.now(TIMEZONE).date()]
         if not found: return await update.message.reply_text("📭 Нічого не знайдено.")
