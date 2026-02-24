@@ -350,12 +350,12 @@ class NungParser:
         except: return []
     
     @staticmethod
-    def _fetch_links_map(group_name: str) -> Dict[str, str]:
-        links_map = {}
-        if not group_name: return links_map
+    def _fetch_links_data(group_name: str) -> List[Dict]:
+        links_data = []
+        if not group_name: return links_data
         
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Content-Type': 'application/x-www-form-urlencoded',
             'Referer': 'https://dekanat.nung.edu.ua/cgi-bin/timetable.cgi?n=700'
         }
@@ -379,40 +379,29 @@ class NungParser:
                 if not any(x in url for x in ['google.com', 'zoom.us', 'teams', 'webex']):
                     continue
 
-                curr = link_div.previous_sibling
-                found_name = None
+                # Дістаємо весь текст з батьківської комірки (<td>), щоб мати назву предмета і тип пари
+                parent = link_div.find_parent('td')
+                if not parent: parent = link_div.parent
                 
-                for _ in range(5):
-                    if not curr: break
-                    text = ""
-                    if isinstance(curr, str): text = curr.strip()
-                    elif hasattr(curr, 'get_text'): text = curr.get_text(strip=True)
-                    
-                    if len(text) > 3:
-                        match = re.search(r'([A-ZА-ЯІЇЄ][a-zа-яіїє\']+)\s+[A-ZА-ЯІЇЄ]', text)
-                        if match:
-                            found_name = match.group(1)
-                            break
-                    curr = curr.previous_sibling
-
-                if found_name:
-                    links_map[found_name] = url
+                text_content = parent.get_text(separator=' ', strip=True)
+                links_data.append({'url': url, 'text': text_content})
                         
         except Exception as e:
             logger.error(f"HTML Link Parsing Error: {e}")
             
-        return links_map
+        return links_data
 
     @staticmethod
     def get_schedule(obj_id: str, start_date: date = None, end_date: date = None, obj_type: str = 'group', group_name: str = None) -> List[ScheduleEvent]:
         if not start_date: start_date = datetime.now(TIMEZONE).date() - timedelta(days=1)
-        if not end_date: end_date = datetime.now(TIMEZONE).date() + timedelta(days=30)
+        # 180 днів для отримання розкладу до кінця семестру за замовчуванням
+        if not end_date: end_date = datetime.now(TIMEZONE).date() + timedelta(days=180)
         
-        links_map = {}
+        links_data = []
         if obj_type == 'group' and group_name:
-            links_map = NungParser._fetch_links_map(group_name)
+            links_data = NungParser._fetch_links_data(group_name)
 
-        return NungParser.get_schedule_json(obj_id, obj_type, start_date, end_date, links_map)
+        return NungParser.get_schedule_json(obj_id, obj_type, start_date, end_date, links_data)
 
     @staticmethod
     def _split_merged_events(description: str) -> List[str]:
@@ -443,7 +432,7 @@ class NungParser:
         return results
 
     @staticmethod
-    def get_schedule_json(obj_id: str, obj_mode: str, start_date: date, end_date: date, links_map: Dict[str, str] = None) -> List[ScheduleEvent]:
+    def get_schedule_json(obj_id: str, obj_mode: str, start_date: date, end_date: date, links_data: List[Dict] = None) -> List[ScheduleEvent]:
         params = {
             'req_type': 'rozklad', 'req_mode': obj_mode, 'OBJ_ID': obj_id,
             'ros_text': 'separated', 'begin_date': start_date.strftime('%d.%m.%Y'),
@@ -490,21 +479,17 @@ class NungParser:
                     teacher_name = item.get('teacher') or ""
                     
                     # Визначаємо групу та підгрупу
-                    # Для режиму separated підгрупа приходить в окремому полі 'group'
                     base_group = item.get('object') or ""
-                    subgroup_info = item.get('group') or ""  # Тут буде "(підгр. 1)" або "(підгр. 2)"
+                    subgroup_info = item.get('group') or "" 
                     
                     # Формуємо повну назву групи
                     if obj_mode == 'group':
-                        # Для режиму group об'єднуємо назву групи + підгрупу
                         group_name = f"{base_group} {subgroup_info}".strip() if subgroup_info else base_group
                     else:
-                        # Для режимів teacher/room - використовуємо base_group або шукаємо в тексті
                         group_name = base_group
                         if not group_name:
                             gm = re.search(r'([A-ZА-ЯІЇЄ]{2,4}-\d{2}-\d)', clean_text)
                             if gm: group_name = gm.group(0)
-                        # Додаємо підгрупу якщо є
                         if subgroup_info:
                             group_name = f"{group_name} {subgroup_info}".strip()
 
@@ -520,11 +505,34 @@ class NungParser:
                     if json_link:
                         final_links.append(json_link)
                     
-                    if not final_links and links_map and teacher_name:
-                        for surname, html_link in links_map.items():
-                            if surname in teacher_name:
-                                final_links.append(html_link)
-                                break
+                    if not final_links and links_data and teacher_name:
+                        # Шукаємо збіги за прізвищем, предметом та типом
+                        norm_teacher = NungParser._normalize(teacher_name.split()[0])
+                        norm_subject = NungParser._normalize(clean_text)
+                        
+                        best_match_link = None
+                        best_score = 0
+                        
+                        for ld in links_data:
+                            norm_cell = NungParser._normalize(ld['text'])
+                            if norm_teacher in norm_cell:
+                                score = 1
+                                subj_words = [w for w in norm_subject.split() if len(w) > 3]
+                                for w in subj_words:
+                                    if w in norm_cell:
+                                        score += 1
+                                
+                                if event_type:
+                                    norm_type = NungParser._normalize(event_type)
+                                    if norm_type in norm_cell:
+                                        score += 2 # Більша вага за точний збіг типу
+                                
+                                if score > best_score:
+                                    best_score = score
+                                    best_match_link = ld['url']
+                                    
+                        if best_match_link:
+                            final_links.append(best_match_link)
 
                     event_data = {
                         'subject': clean_text, 'type': event_type, 'teacher': teacher_name, 
@@ -613,8 +621,9 @@ class ScheduleBot:
             return member.status in [ChatMember.OWNER, ChatMember.ADMINISTRATOR]
         except: return False
 
-    def _get_events(self, group_id: str, group_name: str = None) -> List[ScheduleEvent]:
-        return NungParser.get_schedule(group_id, obj_type='group', group_name=group_name)
+    def _get_events(self, group_id: str, group_name: str = None, start_date: date = None, end_date: date = None) -> List[ScheduleEvent]:
+        # Передаємо дати, щоб парсер не тягнув зайвого, коли ми просимо лише один день
+        return NungParser.get_schedule(group_id, start_date=start_date, end_date=end_date, obj_type='group', group_name=group_name)
 
     async def _pin_message_with_management(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int):
         settings = self.user_manager.get_user_settings(chat_id)
@@ -650,19 +659,20 @@ class ScheduleBot:
         for chat_id in users:
             s = self.user_manager.get_user_settings(chat_id)
             if not s.group_id: continue
-            all_events = NungParser.get_schedule(s.group_id, group_name=s.group_name)
-            events = [e for e in all_events if e.start_time.date() == today]
+            
+            # ОПТИМІЗАЦІЯ: Тягнемо розклад лише на сьогодні
+            events = NungParser.get_schedule(s.group_id, start_date=today, end_date=today, group_name=s.group_name)
             if not events: continue
+            
             if self.image_generator:
                 photo_bio = self.image_generator.create_day_image(events, today)
                 
-                # Формуємо caption з посиланнями
                 # Збираємо інформацію про події з посиланнями
                 subject_links = {} 
                 for e in events:
                     if not e.links: continue
                     for link in e.links:
-                        key = (e.subject, e.group)  # Використовуємо tuple (предмет, група/підгрупа)
+                        key = (e.subject, e.group)
                         if key not in subject_links: subject_links[key] = {}
                         if link not in subject_links[key]: subject_links[key][link] = []
                         subject_links[key][link].append(e.start_time)
@@ -688,11 +698,9 @@ class ScheduleBot:
                 links_text_lines = []
                 for time_key in sorted_times:
                     items = time_grouped[time_key]
-                    # Визначаємо номер пари
                     pair_num = get_pair_number(items[0]['start_time'])
                     pair_emoji = PAIR_EMOJIS.get(pair_num, "📚")
                     
-                    # Рахуємо дублікати предметів ТІЛЬКИ в межах цього часу
                     time_subject_count = {}
                     for item in items:
                         subj = item['subject']
@@ -703,15 +711,12 @@ class ScheduleBot:
                         group = item['group']
                         link = item['link']
                         
-                        # Визначаємо чи потрібно додавати групу - тільки якщо предмет повторюється в цей час
                         subject_display = subject
                         if time_subject_count[subject] > 1 and group:
                             subject_display = f"{subject} {group}"
                         
                         link_name = "Meet 🎥" if "meet" in link else ("Zoom 🎥" if "zoom" in link else "🔗")
                         
-                        # Перший елемент цього часу - з емодзі номера
-                        # Інші - з відступом
                         if idx == 0:
                             links_text_lines.append(f"{pair_emoji} {subject_display}: <a href=\"{link}\">{link_name}</a>")
                         else:
@@ -721,19 +726,15 @@ class ScheduleBot:
                 if links_text_lines: 
                     caption += "\n\n🔗 <b>Посилання на пари:</b>\n" + "\n".join(links_text_lines)
                 
-                # Додаємо секцію з іншими посиланнями (документи, матеріали тощо)
                 other_links = []
                 for e in events:
                     if not e.links: continue
                     for link in e.links:
-                        # Пропускаємо посилання на конференції
                         if any(x in link.lower() for x in ['zoom.us', 'meet.google', 'teams.microsoft', 'webex']):
                             continue
-                        # Визначаємо номер пари
                         pair_num = get_pair_number(e.start_time)
                         pair_emoji = PAIR_EMOJIS.get(pair_num, "📎")
                         
-                        # Скорочуємо назву предмету якщо вона дуже довга
                         subject_short = e.subject[:30] + "..." if len(e.subject) > 30 else e.subject
                         if e.group and len(events) > 1:
                             subject_short = f"{subject_short} {e.group}"
@@ -757,11 +758,14 @@ class ScheduleBot:
                 if s.group_id and s.change_notifications: 
                     active_groups[s.group_id] = s.group_name
             
+            # Перевіряємо весь розклад (180 днів підтягнуться за замовчуванням з get_schedule)
             for group_id, group_name in active_groups.items():
                 new_events = NungParser.get_schedule(group_id, obj_type='group', group_name=group_name)
+                
                 if not new_events:
                     old_events = self.cache_manager._group_caches.get(group_id, [])
                     if old_events: continue
+                    
                 changes = self.cache_manager.update_and_detect_changes(group_id, new_events)
                 if changes:
                     text_changes = self.formatter.format_changes(changes)
@@ -777,13 +781,6 @@ class ScheduleBot:
 
     # --- Commands ---
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        # --- ПОЧАТОК ЗМІН ---
-        # Якщо є аргументи (наприклад, перейшли за посиланням ?start=KI-24-1)
-        if context.args:
-            await self.group_command(update, context)
-            return
-        # --- КІНЕЦЬ ЗМІН ---
-
         s = self.user_manager.get_user_settings(update.effective_chat.id)
         msg = f"👋 Привіт!\n"
         if s.group_name: msg += f"✅ Група: <b>{s.group_name}</b>\n"
@@ -814,17 +811,15 @@ class ScheduleBot:
         if mode == 'week': bio = self.image_generator.create_week_image(events, date_obj)
         else: bio = self.image_generator.create_day_image(events, date_obj)
 
-        # Збираємо інформацію про події з посиланнями
         subject_links = {} 
         for e in events:
             if not e.links: continue
             for link in e.links:
-                key = (e.subject, e.group)  # Використовуємо tuple (предмет, група/підгрупа)
+                key = (e.subject, e.group)
                 if key not in subject_links: subject_links[key] = {}
                 if link not in subject_links[key]: subject_links[key][link] = []
                 subject_links[key][link].append(e.start_time)
 
-        # Групуємо по часу початку для красивого виводу
         time_grouped = {}
         for (subject, group), links_data in subject_links.items():
             for link, times in links_data.items():
@@ -839,17 +834,14 @@ class ScheduleBot:
                         'start_time': start_time
                     })
 
-        # Сортуємо по часу
         sorted_times = sorted(time_grouped.keys())
         
         links_text_lines = []
         for time_key in sorted_times:
             items = time_grouped[time_key]
-            # Визначаємо номер пари
             pair_num = get_pair_number(items[0]['start_time'])
             pair_emoji = PAIR_EMOJIS.get(pair_num, "📚")
             
-            # Рахуємо дублікати предметів ТІЛЬКИ в межах цього часу
             time_subject_count = {}
             for item in items:
                 subj = item['subject']
@@ -860,15 +852,12 @@ class ScheduleBot:
                 group = item['group']
                 link = item['link']
                 
-                # Визначаємо чи потрібно додавати групу - тільки якщо предмет повторюється в цей час
                 subject_display = subject
                 if time_subject_count[subject] > 1 and group:
                     subject_display = f"{subject} {group}"
                 
                 link_name = "Meet 🎥" if "meet" in link else ("Zoom 🎥" if "zoom" in link else "🔗")
                 
-                # Перший елемент цього часу - з емодзі номера
-                # Інші - з відступом
                 if idx == 0:
                     links_text_lines.append(f"{pair_emoji} {subject_display}: <a href=\"{link}\">{link_name}</a>")
                 else:
@@ -878,19 +867,15 @@ class ScheduleBot:
         if links_text_lines: 
             full_caption += "\n\n🔗 <b>Посилання на пари:</b>\n" + "\n".join(links_text_lines)
         
-        # Додаємо секцію з іншими посиланнями (документи, матеріали тощо)
         other_links = []
         for e in events:
             if not e.links: continue
             for link in e.links:
-                # Пропускаємо посилання на конференції
                 if any(x in link.lower() for x in ['zoom.us', 'meet.google', 'teams.microsoft', 'webex']):
                     continue
-                # Визначаємо номер пари
                 pair_num = get_pair_number(e.start_time)
                 pair_emoji = PAIR_EMOJIS.get(pair_num, "📎")
                 
-                # Скорочуємо назву предмету якщо вона дуже довга
                 subject_short = e.subject[:30] + "..." if len(e.subject) > 30 else e.subject
                 if e.group and len(events) > 1:
                     subject_short = f"{subject_short} {e.group}"
@@ -935,7 +920,16 @@ class ScheduleBot:
         
         if mode == 'week': target_date = target_date - timedelta(days=target_date.weekday())
 
-        events = self._get_events(s.group_id, s.group_name)
+        # Визначаємо точне вікно дат для парсера, щоб швидко завантажувалось
+        if mode == 'week':
+            fetch_start = target_date
+            fetch_end = target_date + timedelta(days=6)
+        else:
+            fetch_start = target_date
+            fetch_end = target_date
+
+        events = self._get_events(s.group_id, s.group_name, start_date=fetch_start, end_date=fetch_end)
+        
         if mode == 'week':
             filtered_events = [e for e in events if target_date <= e.start_time.date() <= target_date + timedelta(days=6)]
             caption = f"📅 Розклад: {s.group_name}"
@@ -981,6 +975,7 @@ class ScheduleBot:
         if not context.args: return await update.message.reply_text("🔍 Приклад: `/search Математика`", parse_mode=ParseMode.MARKDOWN)
         
         query = " ".join(context.args)
+        # Оскільки тут потрібен пошук на майбутнє, тягнемо стандартні 180 днів
         events = self._get_events(s.group_id, s.group_name)
         found = [e for e in events if e.matches_query(query) and e.start_time.date() >= datetime.now(TIMEZONE).date()]
         if not found: return await update.message.reply_text("📭 Нічого не знайдено.")
