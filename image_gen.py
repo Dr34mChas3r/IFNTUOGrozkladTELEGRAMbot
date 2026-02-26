@@ -190,6 +190,7 @@ class ScheduleImageGenerator:
         cursor_y = 120
         if not events:
             draw.text((self.PADDING, cursor_y), "Пар немає!", font=self.font_subject, fill=self.TEXT_SEC)
+            cursor_y += 60
         else:
             for key in sorted_keys:
                 slot_h = group_heights[key]
