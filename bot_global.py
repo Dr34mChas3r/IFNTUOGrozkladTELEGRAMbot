@@ -483,6 +483,10 @@ class NungParser:
                 descriptions = NungParser._split_merged_events(original_desc)
                 json_link = item.get('link') or item.get('url') or ""
                 
+                # Визначаємо чи запис розбито на підгрупи — якщо так,
+                # json_link не можна призначати автоматично (він може належати лише одній підгрупі)
+                has_multiple_subgroups = len(descriptions) > 1
+                
                 for description in descriptions:
                     date_str = item.get('date')
                     time_range = item.get('lesson_time', '').split('-')
@@ -506,13 +510,7 @@ class NungParser:
                         if type_match: event_type = type_match.group(1)
 
                     clean_text = description.replace('*', '').strip()
-                    
-                    # Пріоритет викладачу з поточного розбитого шматка (description), а не загальному JSON
-                    tm = re.search(r'(доцент|професор|викладач|асистент|зав\.каф\.)\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+(\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+)?', clean_text)
-                    if tm: 
-                        teacher_name = tm.group(0)
-                    else:
-                        teacher_name = item.get('teacher') or ""
+                    teacher_name = item.get('teacher') or ""
                     
                     base_group = item.get('object') or ""
                     subgroup_info = item.get('group') or "" 
@@ -527,6 +525,10 @@ class NungParser:
                         if subgroup_info:
                             group_name = f"{group_name} {subgroup_info}".strip()
 
+                    if not teacher_name and obj_mode == 'group':
+                        tm = re.search(r'(доцент|професор|викладач|асистент|зав\.каф\.)\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+(\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+)?', clean_text)
+                        if tm: teacher_name = tm.group(0)
+
                     is_remote = (item.get('online') in ['Tak', 'Yes', '1', 'Так', 'True']) or "дистанційно" in clean_text.lower()
                     clean_text = re.sub(r'(?i)дистанційно', '', clean_text).strip()
                     if not clean_text and item.get('title'): clean_text = item.get('title')
@@ -537,16 +539,17 @@ class NungParser:
                         event_date_str = start_dt.strftime('%d.%m.%Y')
                         event_time_str = start_dt.strftime('%H:%M')
                         
-                        # Спершу шукаємо за часом, потім за днем, і тільки потім всі
                         cell_links = [ld for ld in links_data if ld['date'] == event_date_str and ld['time'] == event_time_str]
                         if not cell_links: 
-                            cell_links = [ld for ld in links_data if ld['date'] == event_date_str]
-                        if not cell_links:
                             cell_links = links_data
                         
-                        clean_teacher = re.sub(r'(?i)(доцент|професор|викладач|асистент|зав\.каф\.)', '', teacher_name).strip()
+                        # Відрізаємо звання (доцент, професор) і зірочку (*),
+                        # щоб шукати тільки за прізвищем
+                        clean_teacher = re.sub(r'(?i)(доцент|професор|викладач|асистент|зав\.каф\.)', '', teacher_name)
+                        clean_teacher = clean_teacher.replace('*', '').strip()
                         norm_teacher = NungParser._normalize(clean_teacher.split()[0]) if clean_teacher else ""
                         
+                        # Розбиваємо предмет на слова ДО нормалізації, щоб шукати точні збіги
                         subj_words = [NungParser._normalize(w) for w in clean_text.split() if len(NungParser._normalize(w)) > 3]
                         
                         best_match_link = None
@@ -556,40 +559,44 @@ class NungParser:
                             norm_cell = NungParser._normalize(ld['text'])
                             score = 0
                             
+                            # +5 за точний збіг ПРІЗВИЩА (обов'язкова умова!)
                             if norm_teacher and norm_teacher in norm_cell:
                                 score += 5
                             
+                            # +2 за кожне слово з назви предмета
                             for w in subj_words:
                                 if w in norm_cell:
                                     score += 2
                                 
+                            # +3 за правильний тип заняття (Л/Лаб/Пр)
                             if event_type:
                                 norm_type = NungParser._normalize(event_type)
                                 if norm_type in norm_cell: 
                                     score += 3
                                 
-                            # СТРОГА ПЕРЕВІРКА ПІДГРУПИ (додано пошук в description)
-                            subg_match = re.search(r'підгр\.\s*(\d+)', description.lower()) or re.search(r'підгр\.\s*(\d+)', group_name.lower()) or re.search(r'підгр\.\s*(\d+)', subgroup_info.lower())
-                            
+                            # СТРОГА ПЕРЕВІРКА ПІДГРУПИ
+                            subg_match = re.search(r'підгр\.\s*(\d+)', group_name.lower()) or re.search(r'підгр\.\s*(\d+)', subgroup_info.lower())
                             if subg_match:
                                 subg_num = subg_match.group(1)
                                 if f"підгр. {subg_num}" in ld['text'].lower() or f"підгр.{subg_num}" in ld['text'].lower() or f"({subg_num})" in norm_cell:
-                                    score += 20 
+                                    score += 15 # +15 якщо це наша підгрупа
                                 elif "підгр" in ld['text'].lower() or re.search(r'\(\d\)', norm_cell):
-                                    score -= 30 # Чужа підгрупа - жорсткий штраф
-                            else:
-                                # Якщо пара для ВСІЄЇ групи, але посилання має вказівку підгрупи - штрафуємо
-                                if "підгр" in ld['text'].lower() or re.search(r'підгр\.\s*\d+', ld['text'].lower()):
-                                    score -= 30
+                                    score -= 20 # Жорсткий штраф, якщо це посилання іншої підгрупи
                             
-                            if score > best_score and score > 0:
+                            # МІНІМАЛЬНИЙ ПОРІГ: прізвище МУСИТЬ збігатися (score >= 5)
+                            # Без збігу прізвища — посилання не призначається взагалі
+                            if score >= 5 and score > best_score:
                                 best_score = score
                                 best_match_link = ld['url']
                                     
                         if best_match_link:
                             final_links.append(best_match_link)
 
-                    if not final_links and json_link:
+                    # json_link як fallback тільки якщо:
+                    # 1. Посилання ще не знайдено через HTML-парсинг
+                    # 2. Запис НЕ розбито на кілька підгруп (бо тоді json_link може належати іншій підгрупі)
+                    # 3. Викладач відсутній (або посилання точно одне для всіх)
+                    if not final_links and json_link and not has_multiple_subgroups:
                         final_links.append(json_link)
 
                     event_data = {
