@@ -285,7 +285,7 @@ class UserManager:
 
 class NungParser:
     API_URL = "https://dekanat.nung.edu.ua/cgi-bin/timetable_export.cgi"
-    HTML_URL = "https://dekanat.nung.edu.ua/cgi-bin/timetable.cgi?n=700"
+    HTML_URL = "https://example.com" # disabled links parsing due to incorrect working. I do not want fix it and i dont know how to fix it. 
     _global_cache = {'teachers': [], 'rooms': [], 'timestamp': None}
 
     @staticmethod
