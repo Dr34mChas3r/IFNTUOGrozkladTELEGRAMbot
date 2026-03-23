@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from io import BytesIO
 from collections import defaultdict
 from PIL import Image, ImageDraw, ImageFont
-import qrcode  # pip install qrcode[pil]
+import qrcode
 
 class ScheduleImageGenerator:
     def __init__(self, font_path="/usr/share/fonts/truetype/roboto/unhinted/RobotoTTF/Roboto-Regular.ttf"):
@@ -11,254 +11,228 @@ class ScheduleImageGenerator:
         self.TEXT_MAIN = "#000000"
         self.TEXT_SEC = "#555555"
         self.TIME_BG = "#E1E8ED"
-        self.CARD_BG = "#FFFFFF"  # фон для карток
+        self.CARD_BG = "#FFFFFF"
         
-        # Кольори для смужок
-        self.ACCENT_BLUE = "#3498db"   # 1 підгрупа
-        self.ACCENT_ORANGE = "#e67e22" # 2 підгрупа
-        self.ACCENT_GREEN = "#2ecc71"  # Загальні пари (замість сірого)
-        self.ACCENT_RED = "#e74c3c"    # Насичений червоний для відмінених
+        # Насичена палітра кольорів
+        self.ACCENT_BLUE = "#0000ff"   # Насичений синій
+        self.ACCENT_ORANGE = "#ffa500" # Насичений помаранчевий
+        self.ACCENT_GREEN = "#008000"  # Насичений зелений
+        self.ACCENT_RED = "#d60000"    # Глибокий червоний (для відміни)
 
         self.WIDTH = 1200
         self.PADDING = 40
-        self.QR_SIZE = 150
-        self.CARD_PADDING = 15  # відступ всередині картки
+        self.QR_SIZE = 130
+        self.CARD_PADDING = 25 
+        
+        # Фіксована ширина картки
+        self.FIXED_CARD_WIDTH = self.WIDTH - 210 
         
         try:
             self.font_header = ImageFont.truetype(font_path, 42)
             self.font_time = ImageFont.truetype(font_path, 34)
-            self.font_subject = ImageFont.truetype(font_path, 34)
-            self.font_details = ImageFont.truetype(font_path, 26)
+            self.font_subject = ImageFont.truetype(font_path, 36)
+            self.font_details = ImageFont.truetype(font_path, 28)
+            self.font_status = ImageFont.truetype(font_path, 24)
         except OSError:
             self.font_header = ImageFont.load_default()
             self.font_time = ImageFont.load_default()
             self.font_subject = ImageFont.load_default()
             self.font_details = ImageFont.load_default()
+            self.font_status = ImageFont.load_default()
 
-    def _wrap_text(self, text, font, max_width):
+    def _wrap_text(self, text, font, max_px_width):
+        """Розбиває текст на рядки відповідно до заданої ширини"""
+        if not text: return []
+        avg_char = font.getlength("a") if hasattr(font, 'getlength') else 15
+        max_chars = max(1, int(max_px_width / avg_char))
+        
         lines = []
-        if not text: return lines
-        try:
-            avg_char_width = font.getlength("a")
-        except AttributeError:
-            avg_char_width = font.getsize("a")[0]
-            
-        if avg_char_width == 0: avg_char_width = 10
-        max_chars = int(max_width / avg_char_width)
         for paragraph in text.split('\n'):
             lines.extend(textwrap.wrap(paragraph, width=max_chars))
         return lines
 
-    def _calculate_event_block_height(self, event, width):
-        has_qr = bool(event.links)
+    def _prepare_event_content(self, event):
+        """Обчислює висоту контенту та готує дані для малювання"""
+        is_cancelled = getattr(event, 'is_cancelled', False)
+        has_qr = bool(event.links) and not is_cancelled
         
-        qr_reserved_space = (self.QR_SIZE + 40) if has_qr else 0
-        max_text_width = width - 160 - qr_reserved_space
-        
-        display_subject = event.subject
-        # Логіка додавання групи до назви для розрахунку висоти
-        if "(підгр." not in display_subject.lower() and event.group:
-             display_subject += f" {event.group}"
+        qr_space = (self.QR_SIZE + 30) if has_qr else 0
+        content_max_w = self.FIXED_CARD_WIDTH - qr_space - (self.CARD_PADDING * 2) - 50
 
-        subject_lines = self._wrap_text(display_subject, self.font_subject, max_text_width)
-        height = (len(subject_lines) * 45) + 5
+        # Перевіряємо підгрупи
+        subj_raw = event.subject
+        grp_raw = event.group if event.group else ""
+        has_sg1 = "(підгр. 1)" in subj_raw or "(підгр. 1)" in grp_raw
+        has_sg2 = "(підгр. 2)" in subj_raw or "(підгр. 2)" in grp_raw
         
-        meta_info = []
-        if event.event_type: meta_info.append(f"({event.event_type})")
-        if event.room: meta_info.append(f"Ауд: {event.room}")
-        if event.is_remote: meta_info.append("Online")
-        if event.teacher: meta_info.append(f"Викл: {event.teacher}")
+        # Висота плашок (кожна по 45px)
+        subgroup_h = 45 if (has_sg1 or has_sg2) else 0
+        status_h = 45 if is_cancelled else 0
         
-        details_text = " | ".join(meta_info)
-        details_lines = self._wrap_text(details_text, self.font_details, max_text_width)
+        display_subj = event.subject
+        if event.group and "(підгр." not in display_subj.lower():
+            display_subj += f" {event.group}"
+            
+        subj_lines = self._wrap_text(display_subj, self.font_subject, content_max_w)
+        subj_h = len(subj_lines) * 48
+
+        meta = []
+        if event.event_type: meta.append(f"({event.event_type})")
+        if event.room: meta.append(f"Ауд: {event.room}")
+        if event.is_remote: meta.append("Online")
+        meta_lines = self._wrap_text(" | ".join(meta), self.font_details, content_max_w)
+        meta_h = len(meta_lines) * 38
+
+        teacher_lines = self._wrap_text(f"Викл: {event.teacher}" if event.teacher else "", self.font_details, content_max_w)
+        teacher_h = len(teacher_lines) * 38
+
+        total_h = self.CARD_PADDING * 2 + subgroup_h + status_h + subj_h + meta_h + teacher_h + 15
+        min_h = (self.QR_SIZE + self.CARD_PADDING * 2) if has_qr else 120
         
-        height += (len(details_lines) * 35) + 15
+        return {
+            'lines': { 'subj': subj_lines, 'meta': meta_lines, 'teacher': teacher_lines },
+            'height': max(min_h, total_h),
+            'has_qr': has_qr,
+            'is_cancelled': is_cancelled,
+            'has_sg1': has_sg1,
+            'has_sg2': has_sg2,
+            'subj_lines': subj_lines
+        }
+
+    def _draw_event_card(self, img, draw, x, y, event):
+        data = self._prepare_event_content(event)
         
-        min_height = (self.QR_SIZE + 20) if has_qr else 90
-        return max(min_height, height)
+        card_x1 = x + 130
+        card_x2 = card_x1 + self.FIXED_CARD_WIDTH
+        card_h = data['height']
+        
+        # Колір лівої смужки
+        bar_color = self.ACCENT_GREEN
+        if data['has_sg1']: bar_color = self.ACCENT_BLUE
+        elif data['has_sg2']: bar_color = self.ACCENT_ORANGE
+        
+        # Якщо відмінено повністю (не для підгрупи), смужка червона
+        if data['is_cancelled'] and not (data['has_sg1'] or data['has_sg2']):
+            bar_color = self.ACCENT_RED
+
+        # Тінь + Картка
+        draw.rounded_rectangle([card_x1 + 3, y + 3, card_x2 + 3, y + card_h + 3], radius=15, fill="#00000008")
+        draw.rounded_rectangle([card_x1, y, card_x2, y + card_h], radius=15, fill=self.CARD_BG)
+        
+        # Смужка акценту
+        draw.rounded_rectangle([card_x1 + 10, y + 15, card_x1 + 18, y + card_h - 15], radius=5, fill=bar_color)
+        
+        curr_y = y + self.CARD_PADDING
+        subj_x = card_x1 + 35
+
+        # 1. Плашка підгрупи (тільки колір підгрупи)
+        if data['has_sg1']:
+            draw.rounded_rectangle([subj_x, curr_y, subj_x + 165, curr_y + 35], radius=8, fill=self.ACCENT_BLUE)
+            draw.text((subj_x + 15, curr_y + 4), "Підгрупа 1", font=self.font_status, fill="white")
+            curr_y += 45
+        elif data['has_sg2']:
+            draw.rounded_rectangle([subj_x, curr_y, subj_x + 165, curr_y + 35], radius=8, fill=self.ACCENT_ORANGE)
+            draw.text((subj_x + 15, curr_y + 4), "Підгрупа 2", font=self.font_status, fill=self.TEXT_MAIN)
+            curr_y += 45
+
+        # 2. Плашка ВІДМІНЕНО (ЗАВЖДИ ЧЕРВОНА)
+        if data['is_cancelled']:
+            draw.rounded_rectangle([subj_x, curr_y, subj_x + 165, curr_y + 35], radius=8, fill=self.ACCENT_RED)
+            draw.text((subj_x + 15, curr_y + 4), "ВІДМІНЕНО", font=self.font_status, fill="white")
+            curr_y += 45
+
+        if data['has_qr']:
+            try:
+                qr = qrcode.QRCode(box_size=2, border=1)
+                qr.add_data(event.links[0]); qr.make(fit=True)
+                qr_img = qr.make_image().resize((self.QR_SIZE, self.QR_SIZE))
+                img.paste(qr_img, (int(card_x2 - self.QR_SIZE - 20), int(y + self.CARD_PADDING)))
+            except: pass
+
+        # Малюємо предмет (разом з (підгр. 1/2) в тексті)
+        for line in data['subj_lines']:
+            draw.text((subj_x, curr_y), line, font=self.font_subject, fill=self.TEXT_MAIN)
+            curr_y += 48
+        
+        for line in data['lines']['meta']:
+            draw.text((subj_x, curr_y + 5), line, font=self.font_details, fill=self.TEXT_SEC)
+            curr_y += 38
+
+        for line in data['lines']['teacher']:
+            draw.text((subj_x, curr_y + 5), line, font=self.font_details, fill=self.TEXT_SEC)
+            curr_y += 38
+
+        return card_h
 
     def _draw_time_column(self, draw, x, y, h, start_time, end_time):
-        draw.rounded_rectangle([x, y, x + 110, y + h], radius=10, fill=self.TIME_BG)
-        time_str_start = start_time.strftime('%H:%M')
-        time_str_end = end_time.strftime('%H:%M')
-        text_y = y + 15
-        draw.text((x + 15, text_y), time_str_start, font=self.font_time, fill=self.TEXT_MAIN)
-        draw.text((x + 15, text_y + 35), time_str_end, font=self.font_time, fill=self.TEXT_SEC)
-
-    def _generate_qr(self, link):
-        qr = qrcode.QRCode(box_size=2, border=1)
-        qr.add_data(link)
-        qr.make(fit=True)
-        return qr.make_image(fill_color="black", back_color="white").resize((self.QR_SIZE, self.QR_SIZE))
-
-    def _draw_event_body(self, img, draw, x, y, width, event):
-        cursor_y = y
-        
-        # Базовий колір для спільних пар — зелений
-        bar_color = self.ACCENT_GREEN
-        
-        # Визначаємо колір залежно від статусу та підгрупи
-        if getattr(event, 'is_cancelled', False) or "❌ [ВІДМІНЕНО]" in event.subject:
-            bar_color = self.ACCENT_RED
-        elif "(підгр. 1)" in event.subject or (event.group and "(підгр. 1)" in event.group):
-            bar_color = self.ACCENT_BLUE
-        elif "(підгр. 2)" in event.subject or (event.group and "(підгр. 2)" in event.group):
-            bar_color = self.ACCENT_ORANGE
-            
-        # Картка починається після колонки з часом (110px) + відступ (20px)
-        card_start_x = x + 130
-        subj_x = card_start_x + 20  # Текст всередині картки
-        
-        has_link = bool(event.links)
-        qr_reserved_space = (self.QR_SIZE + 40) if has_link else 0
-        max_text_width = width - 160 - qr_reserved_space - (self.CARD_PADDING * 2)
-        
-        # Відображення групи в назві
-        display_subject = event.subject
-        if "(підгр." not in display_subject.lower() and event.group:
-             display_subject += f" {event.group}"
-        
-        subject_lines = self._wrap_text(display_subject, self.font_subject, max_text_width)
-        
-        block_height = self._calculate_event_block_height(event, width)
-        
-        # Малюємо білу картку з тінню
-        card_x1 = card_start_x
-        card_y1 = cursor_y
-        card_x2 = x + width - 10
-        card_y2 = cursor_y + block_height
-        
-        # Тінь (зміщена на 3px)
-        draw.rounded_rectangle([card_x1 + 3, card_y1 + 3, card_x2 + 3, card_y2 + 3], 
-                              radius=12, fill="#00000015")
-        # Сама картка
-        draw.rounded_rectangle([card_x1, card_y1, card_x2, card_y2], 
-                              radius=12, fill=self.CARD_BG)
-        
-        # Кольоровий бар зліва всередині картки
-        draw.rounded_rectangle([card_start_x + 8, cursor_y + 10, card_start_x + 16, cursor_y + block_height - 10], 
-                              radius=4, fill=bar_color)
-        
-        # Додаємо внутрішній відступ
-        cursor_y += self.CARD_PADDING
-        
-        if has_link:
-            try:
-                qr_img = self._generate_qr(event.links[0])
-                qr_x = card_x2 - self.QR_SIZE - 15
-                qr_y = cursor_y + 5
-                img.paste(qr_img, (int(qr_x), int(qr_y)))
-            except Exception as e:
-                print(f"QR Error: {e}")
-
-        for line in subject_lines:
-            draw.text((subj_x, cursor_y), line, font=self.font_subject, fill=self.TEXT_MAIN)
-            cursor_y += 45
-            
-        cursor_y += 5
-        
-        meta_info = []
-        if event.event_type: meta_info.append(f"({event.event_type})")
-        if event.room: meta_info.append(f"Ауд: {event.room}")
-        if event.is_remote: meta_info.append("Online")
-        
-        line1 = " | ".join(meta_info)
-        lines_to_draw = []
-        if line1: lines_to_draw.append(line1)
-        if event.teacher: lines_to_draw.append(f"Викл: {event.teacher}")
-        
-        for text_part in lines_to_draw:
-            wrapped = self._wrap_text(text_part, self.font_details, max_text_width)
-            for w_line in wrapped:
-                draw.text((subj_x, cursor_y), w_line, font=self.font_details, fill=self.TEXT_SEC)
-                cursor_y += 35
-                
-        return block_height
+        draw.rounded_rectangle([x, y, x + 110, y + h], radius=15, fill=self.TIME_BG)
+        draw.text((x + 15, y + 20), start_time.strftime('%H:%M'), font=self.font_time, fill=self.TEXT_MAIN)
+        draw.text((x + 15, y + 60), end_time.strftime('%H:%M'), font=self.font_time, fill=self.TEXT_SEC)
 
     def create_day_image(self, events, date_obj) -> BytesIO:
         events.sort(key=lambda x: x.start_time)
-        grouped_events = defaultdict(list)
-        for e in events:
-            time_key = (e.start_time, e.end_time)
-            grouped_events[time_key].append(e)
+        grouped = defaultdict(list)
+        for e in events: grouped[(e.start_time, e.end_time)].append(e)
             
-        sorted_keys = sorted(grouped_events.keys())
-        
-        total_content_height = 0
-        group_heights = {}
+        sorted_keys = sorted(grouped.keys())
+        total_h = 150
+        slot_data = {}
         
         for key in sorted_keys:
-            group = grouped_events[key]
-            group.sort(key=lambda x: x.group if x.group else "") 
+            group = grouped[key]
             h_acc = 0
             for i, ev in enumerate(group):
-                h_acc += self._calculate_event_block_height(ev, self.WIDTH)
-                # Додаємо відступ тільки якщо це НЕ остання подія
-                if i < len(group) - 1:
-                    h_acc += 25
-            group_heights[key] = h_acc
-            total_content_height += h_acc + 30  # Відступ між слотами
+                prep = self._prepare_event_content(ev)
+                h_acc += prep['height']
+                if i < len(group)-1: h_acc += 20
+            slot_data[key] = h_acc
+            total_h += h_acc + 40
             
-        final_height = max(400, 150 + total_content_height)
-        
-        img = Image.new('RGB', (self.WIDTH, final_height), color=self.BG_COLOR)
+        img = Image.new('RGB', (self.WIDTH, max(400, total_h)), color=self.BG_COLOR)
         draw = ImageDraw.Draw(img)
         
-        date_str = date_obj.strftime("%d.%m.%Y")
-        weekday = ["Понеділок", "Вівторок", "Середа", "Четвер", "П'ятниця", "Субота", "Неділя"][date_obj.weekday()]
-        header_text = f"{date_str} ({weekday})"
-        draw.text((self.PADDING, self.PADDING), header_text, font=self.font_header, fill=self.TEXT_MAIN)
+        header = f"{date_obj.strftime('%d.%m.%Y')} ({['Понеділок','Вівторок','Середа','Четвер','П’ятниця','Субота','Неділя'][date_obj.weekday()]})"
+        draw.text((self.PADDING, self.PADDING), header, font=self.font_header, fill=self.TEXT_MAIN)
         
-        cursor_y = 120
-        
+        cursor_y = 130
         if not events:
             draw.text((self.PADDING, cursor_y), "Пар немає, можна відпочивати!", font=self.font_subject, fill=self.TEXT_SEC)
         else:
             for key in sorted_keys:
-                group = grouped_events[key]
-                group.sort(key=lambda x: x.group if x.group else "")
-                slot_height = group_heights[key]  # Вже правильно розраховано
-                self._draw_time_column(draw, self.PADDING, cursor_y, slot_height, key[0], key[1])
-                sub_cursor_y = cursor_y
-                for i, ev in enumerate(group):
-                    h = self._draw_event_body(img, draw, self.PADDING, sub_cursor_y, self.WIDTH - (self.PADDING*2), ev)
-                    sub_cursor_y += h
-                    # Додаємо відступ тільки між картками, не після останньої
-                    if i < len(group) - 1:
-                        sub_cursor_y += 25
-                cursor_y += slot_height + 50  # Відступ між часовими слотами
+                h = slot_data[key]
+                self._draw_time_column(draw, self.PADDING, cursor_y, h, key[0], key[1])
+                sub_y = cursor_y
+                for i, ev in enumerate(grouped[key]):
+                    sub_y += self._draw_event_card(img, draw, self.PADDING, sub_y, ev)
+                    if i < len(grouped[key])-1: sub_y += 20
+                cursor_y += h + 40
 
-        final_img = img.crop((0, 0, self.WIDTH, cursor_y + self.PADDING))
         bio = BytesIO()
-        final_img.save(bio, 'PNG')
+        img.crop((0, 0, self.WIDTH, cursor_y + 20)).save(bio, 'PNG')
         bio.seek(0)
         return bio
 
     def create_week_image(self, events, start_date) -> BytesIO:
-        day_images = []
-        total_height = 160
+        imgs = []
+        total_h = 180
         for i in range(7):
-            current_date = start_date + timedelta(days=i)
-            day_events = [e for e in events if e.start_time.date() == current_date]
-            if not day_events and i >= 5: continue
-            bio = self.create_day_image(day_events, current_date)
-            day_img = Image.open(bio)
-            day_images.append(day_img)
-            total_height += day_img.height + 20
+            d = start_date + timedelta(days=i)
+            day_evs = [e for e in events if e.start_time.date() == d]
+            if not day_evs and i >= 5: continue
+            day_img = Image.open(self.create_day_image(day_evs, d))
+            imgs.append(day_img)
+            total_h += day_img.height + 30
 
-        final_img = Image.new('RGB', (self.WIDTH, total_height), color=self.BG_COLOR)
-        draw = ImageDraw.Draw(final_img)
+        final = Image.new('RGB', (self.WIDTH, total_h), color=self.BG_COLOR)
+        draw = ImageDraw.Draw(final)
+        draw.text((self.PADDING, 40), f"Тиждень: {start_date.strftime('%d.%m')} - {(start_date+timedelta(days=6)).strftime('%d.%m')}", font=self.font_header, fill=self.TEXT_MAIN)
         
-        end_date = start_date + timedelta(days=6)
-        week_title = f"Тиждень: {start_date.strftime('%d.%m')} - {end_date.strftime('%d.%m')}"
-        draw.text((self.PADDING, 40), week_title, font=self.font_header, fill=self.TEXT_MAIN)
-        
-        cursor_y = 140
-        for d_img in day_images:
-            final_img.paste(d_img, (0, cursor_y))
-            cursor_y += d_img.height + 20
+        curr_y = 140
+        for im in imgs:
+            final.paste(im, (0, curr_y))
+            curr_y += im.height + 30
             
         bio = BytesIO()
-        final_img.save(bio, 'PNG')
+        final.save(bio, 'PNG')
         bio.seek(0)
         return bio
