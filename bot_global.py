@@ -92,11 +92,22 @@ class ScheduleEvent:
         self.start_time = data.get('start_time', datetime.now(TIMEZONE))
         self.end_time = data.get('end_time', datetime.now(TIMEZONE))
         
+        # Статус відміненої пари
+        self.is_cancelled = data.get('is_cancelled', False)
+        
         self.subject = self._clean_subject(self.raw_subject)
+        
+        # Додаємо маркер, якщо пару відмінено
+        if self.is_cancelled:
+            self.subject = f"[Увага! ЗАНЯТТЯ ВІДМІНЕНО!]{self.subject}"
+            
         self.hash = self._calculate_hash()
 
     def _clean_subject(self, text: str) -> str:
+        # На випадок, якщо деканат все ж вліпить це в опис — підчищаємо
+        text = re.sub(r'(?i)Увага!\s*Заняття\s*відмінено!?\s*', '', text)
         text = re.sub(r'(?i)дистанційно', '', text)
+        
         if self.event_type:
             escaped_type = re.escape(self.event_type)
             text = re.sub(fr'\({escaped_type}\)', '', text, flags=re.IGNORECASE)
@@ -131,7 +142,8 @@ class ScheduleEvent:
             'is_remote': self.is_remote,
             'links': self.links,
             'start_time': self.start_time.isoformat(),
-            'end_time': self.end_time.isoformat()
+            'end_time': self.end_time.isoformat(),
+            'is_cancelled': self.is_cancelled
         }
     
     @classmethod
@@ -483,8 +495,6 @@ class NungParser:
                 descriptions = NungParser._split_merged_events(original_desc)
                 json_link = item.get('link') or item.get('url') or ""
                 
-                # Визначаємо чи запис розбито на підгрупи — якщо так,
-                # json_link не можна призначати автоматично (він може належати лише одній підгрупі)
                 has_multiple_subgroups = len(descriptions) > 1
                 
                 for description in descriptions:
@@ -533,6 +543,9 @@ class NungParser:
                     clean_text = re.sub(r'(?i)дистанційно', '', clean_text).strip()
                     if not clean_text and item.get('title'): clean_text = item.get('title')
 
+                    # --- ОСЬ ТУТ ЛОВИМО СТАТУС ВІДМІНИ З ПОЛЯ "replacement" ---
+                    is_cancelled = "відмінено" in str(item.get('replacement', '')).lower()
+
                     final_links = []
                     
                     if links_data and teacher_name:
@@ -543,13 +556,10 @@ class NungParser:
                         if not cell_links: 
                             cell_links = links_data
                         
-                        # Відрізаємо звання (доцент, професор) і зірочку (*),
-                        # щоб шукати тільки за прізвищем
                         clean_teacher = re.sub(r'(?i)(доцент|професор|викладач|асистент|зав\.каф\.)', '', teacher_name)
                         clean_teacher = clean_teacher.replace('*', '').strip()
                         norm_teacher = NungParser._normalize(clean_teacher.split()[0]) if clean_teacher else ""
                         
-                        # Розбиваємо предмет на слова ДО нормалізації, щоб шукати точні збіги
                         subj_words = [NungParser._normalize(w) for w in clean_text.split() if len(NungParser._normalize(w)) > 3]
                         
                         best_match_link = None
@@ -559,32 +569,26 @@ class NungParser:
                             norm_cell = NungParser._normalize(ld['text'])
                             score = 0
                             
-                            # +5 за точний збіг ПРІЗВИЩА (обов'язкова умова!)
                             if norm_teacher and norm_teacher in norm_cell:
                                 score += 5
                             
-                            # +2 за кожне слово з назви предмета
                             for w in subj_words:
                                 if w in norm_cell:
                                     score += 2
                                 
-                            # +3 за правильний тип заняття (Л/Лаб/Пр)
                             if event_type:
                                 norm_type = NungParser._normalize(event_type)
                                 if norm_type in norm_cell: 
                                     score += 3
                                 
-                            # СТРОГА ПЕРЕВІРКА ПІДГРУПИ
                             subg_match = re.search(r'підгр\.\s*(\d+)', group_name.lower()) or re.search(r'підгр\.\s*(\d+)', subgroup_info.lower())
                             if subg_match:
                                 subg_num = subg_match.group(1)
                                 if f"підгр. {subg_num}" in ld['text'].lower() or f"підгр.{subg_num}" in ld['text'].lower() or f"({subg_num})" in norm_cell:
-                                    score += 15 # +15 якщо це наша підгрупа
+                                    score += 15 
                                 elif "підгр" in ld['text'].lower() or re.search(r'\(\d\)', norm_cell):
-                                    score -= 20 # Жорсткий штраф, якщо це посилання іншої підгрупи
+                                    score -= 20 
                             
-                            # МІНІМАЛЬНИЙ ПОРІГ: прізвище МУСИТЬ збігатися (score >= 5)
-                            # Без збігу прізвища — посилання не призначається взагалі
                             if score >= 5 and score > best_score:
                                 best_score = score
                                 best_match_link = ld['url']
@@ -592,17 +596,14 @@ class NungParser:
                         if best_match_link:
                             final_links.append(best_match_link)
 
-                    # json_link як fallback тільки якщо:
-                    # 1. Посилання ще не знайдено через HTML-парсинг
-                    # 2. Запис НЕ розбито на кілька підгруп (бо тоді json_link може належати іншій підгрупі)
-                    # 3. Викладач відсутній (або посилання точно одне для всіх)
                     if not final_links and json_link and not has_multiple_subgroups:
                         final_links.append(json_link)
 
                     event_data = {
                         'subject': clean_text, 'type': event_type, 'teacher': teacher_name, 
                         'room': room, 'group': group_name, 'is_remote': is_remote, 'links': final_links, 
-                        'start_time': start_dt, 'end_time': end_dt
+                        'start_time': start_dt, 'end_time': end_dt,
+                        'is_cancelled': is_cancelled # Передаємо прапорець у подію
                     }
                     events.append(ScheduleEvent(event_data))
             
