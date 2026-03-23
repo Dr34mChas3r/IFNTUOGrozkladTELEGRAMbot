@@ -65,9 +65,8 @@ class ScheduleImageGenerator:
         has_sg1 = "(підгр. 1)" in subj_raw or "(підгр. 1)" in grp_raw
         has_sg2 = "(підгр. 2)" in subj_raw or "(підгр. 2)" in grp_raw
         
-        # Висота плашок (кожна по 45px)
-        subgroup_h = 45 if (has_sg1 or has_sg2) else 0
-        status_h = 45 if is_cancelled else 0
+        # Висота плашок (вони тепер в один ряд, тому додаємо висоту лише раз)
+        badge_h = 45 if (is_cancelled or has_sg1 or has_sg2) else 0
         
         display_subj = event.subject
         if event.group and "(підгр." not in display_subj.lower():
@@ -86,7 +85,7 @@ class ScheduleImageGenerator:
         teacher_lines = self._wrap_text(f"Викл: {event.teacher}" if event.teacher else "", self.font_details, content_max_w)
         teacher_h = len(teacher_lines) * 38
 
-        total_h = self.CARD_PADDING * 2 + subgroup_h + status_h + subj_h + meta_h + teacher_h + 15
+        total_h = self.CARD_PADDING * 2 + badge_h + subj_h + meta_h + teacher_h + 15
         min_h = (self.QR_SIZE + self.CARD_PADDING * 2) if has_qr else 120
         
         return {
@@ -106,39 +105,49 @@ class ScheduleImageGenerator:
         card_x2 = card_x1 + self.FIXED_CARD_WIDTH
         card_h = data['height']
         
-        # Колір лівої смужки
+        # Визначаємо колір смужки акценту
         bar_color = self.ACCENT_GREEN
         if data['has_sg1']: bar_color = self.ACCENT_BLUE
         elif data['has_sg2']: bar_color = self.ACCENT_ORANGE
         
-        # Якщо відмінено повністю (не для підгрупи), смужка червона
+        # Смужка червона лише якщо це загальна відміна (без прив'язки до підгрупи)
         if data['is_cancelled'] and not (data['has_sg1'] or data['has_sg2']):
             bar_color = self.ACCENT_RED
 
-        # Тінь + Картка
+        # Малюємо картку
         draw.rounded_rectangle([card_x1 + 3, y + 3, card_x2 + 3, y + card_h + 3], radius=15, fill="#00000008")
         draw.rounded_rectangle([card_x1, y, card_x2, y + card_h], radius=15, fill=self.CARD_BG)
         
-        # Смужка акценту
+        # Смужка акценту зліва
         draw.rounded_rectangle([card_x1 + 10, y + 15, card_x1 + 18, y + card_h - 15], radius=5, fill=bar_color)
         
         curr_y = y + self.CARD_PADDING
-        subj_x = card_x1 + 35
+        badge_x = card_x1 + 35
 
-        # 1. Плашка підгрупи (тільки колір підгрупи)
+        # --- МАЛЮЄМО ПЛАШКИ В РЯД ---
+        badge_added = False
+        
+        # 1. Плашка підгрупи
         if data['has_sg1']:
-            draw.rounded_rectangle([subj_x, curr_y, subj_x + 165, curr_y + 35], radius=8, fill=self.ACCENT_BLUE)
-            draw.text((subj_x + 15, curr_y + 4), "Підгрупа 1", font=self.font_status, fill="white")
-            curr_y += 45
+            draw.rounded_rectangle([badge_x, curr_y, badge_x + 165, curr_y + 35], radius=8, fill=self.ACCENT_BLUE)
+            draw.text((badge_x + 15, curr_y + 4), "Підгрупа 1", font=self.font_status, fill="white")
+            badge_x += 180
+            badge_added = True
         elif data['has_sg2']:
-            draw.rounded_rectangle([subj_x, curr_y, subj_x + 165, curr_y + 35], radius=8, fill=self.ACCENT_ORANGE)
-            draw.text((subj_x + 15, curr_y + 4), "Підгрупа 2", font=self.font_status, fill=self.TEXT_MAIN)
-            curr_y += 45
+            draw.rounded_rectangle([badge_x, curr_y, badge_x + 165, curr_y + 35], radius=8, fill=self.ACCENT_ORANGE)
+            draw.text((badge_x + 15, curr_y + 4), "Підгрупа 2", font=self.font_status, fill=self.TEXT_MAIN)
+            badge_x += 180
+            badge_added = True
 
-        # 2. Плашка ВІДМІНЕНО (ЗАВЖДИ ЧЕРВОНА)
+        # 2. Плашка ВІДМІНЕНО (в тому ж ряду)
         if data['is_cancelled']:
-            draw.rounded_rectangle([subj_x, curr_y, subj_x + 165, curr_y + 35], radius=8, fill=self.ACCENT_RED)
-            draw.text((subj_x + 15, curr_y + 4), "ВІДМІНЕНО", font=self.font_status, fill="white")
+            draw.rounded_rectangle([badge_x, curr_y, badge_x + 165, curr_y + 35], radius=8, fill=self.ACCENT_RED)
+            draw.text((badge_x + 15, curr_y + 4), "ВІДМІНЕНО", font=self.font_status, fill="white")
+            badge_x += 180
+            badge_added = True
+
+        # Якщо була хоч одна плашка, пересуваємо курсор Y нижче для тексту предмета
+        if badge_added:
             curr_y += 45
 
         if data['has_qr']:
@@ -149,11 +158,13 @@ class ScheduleImageGenerator:
                 img.paste(qr_img, (int(card_x2 - self.QR_SIZE - 20), int(y + self.CARD_PADDING)))
             except: pass
 
-        # Малюємо предмет (разом з (підгр. 1/2) в тексті)
+        # Малюємо основний текст предмета
+        subj_x = card_x1 + 35
         for line in data['subj_lines']:
             draw.text((subj_x, curr_y), line, font=self.font_subject, fill=self.TEXT_MAIN)
             curr_y += 48
         
+        # Деталі та викладач
         for line in data['lines']['meta']:
             draw.text((subj_x, curr_y + 5), line, font=self.font_details, fill=self.TEXT_SEC)
             curr_y += 38
