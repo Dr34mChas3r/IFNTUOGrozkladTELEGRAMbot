@@ -328,12 +328,25 @@ class NungParser:
             return None
 
     @staticmethod
-    def search_global(query: str) -> List[Dict]:
+    def search_global(query: str) -> Dict:
         now = datetime.now()
-        if not NungParser._global_cache['timestamp'] or (now - NungParser._global_cache['timestamp']).seconds > 3600:
-            NungParser._global_cache['teachers'] = NungParser._fetch_objects('teacher')
-            NungParser._global_cache['rooms'] = NungParser._fetch_objects('room')
-            NungParser._global_cache['timestamp'] = now
+        # Оновлюємо кеш тільки якщо він порожній АБО минула година
+        if not NungParser._global_cache['teachers'] or not NungParser._global_cache['timestamp'] or (now - NungParser._global_cache['timestamp']).seconds > 3600:
+            try:
+                t_data = NungParser._fetch_objects('teacher')
+                r_data = NungParser._fetch_objects('room')
+                
+                if not t_data and not r_data:
+                    return {"status": "error", "message": "Сервер деканату не надіслав дані (Timeout/Empty)"}
+                
+                NungParser._global_cache['teachers'] = t_data
+                NungParser._global_cache['rooms'] = r_data
+                NungParser._global_cache['timestamp'] = now
+            except requests.exceptions.ConnectionError:
+                return {"status": "error", "message": "Відсутній зв'язок з сервером dekanat.nung.edu.ua"}
+            except Exception as e:
+                return {"status": "error", "message": f"Непередбачена помилка: {str(e)}"}
+
         query_norm = NungParser._normalize(query)
         results = []
         for t in NungParser._global_cache['teachers']:
@@ -342,24 +355,30 @@ class NungParser:
         for r in NungParser._global_cache['rooms']:
             if query_norm in NungParser._normalize(r.get('name', '')):
                 results.append({'type_label': 'Аудиторія', 'type_code': 'r', 'name': r['name'], 'id': r['ID']})
-        return results[:20]
+        return {"status": "ok", "data": results[:20]}
 
     @staticmethod
     def _fetch_objects(req_mode: str) -> List[Dict]:
-        params = {'req_type': 'obj_list', 'req_mode': req_mode, 'show_ID': 'yes', 'req_format': 'json', 'coding_mode': 'WINDOWS-1251', 'bs': 'ok'}
-        try:
-            response = requests.get(NungParser.API_URL, params=params, timeout=15)
-            response.encoding = response.apparent_encoding
-            data = response.json()
-            objects = []
-            root = data.get('psrozklad_export') or data.get('ps_rozklad_export')
-            if root:
+        for encoding in ['WINDOWS-1251', 'UTF-8']:
+            params = {'req_type': 'obj_list', 'req_mode': req_mode, 'show_ID': 'yes', 'req_format': 'json', 'coding_mode': encoding, 'bs': 'ok'}
+            try:
+                response = requests.get(NungParser.API_URL, params=params, timeout=25)
+                data = response.json()
+                root = data.get('psrozklad_export') or data.get('ps_rozklad_export')
+                if not root:
+                    continue
+                
+                objects = []
                 if req_mode == 'teacher':
                     for dept in root.get('departments', []): objects.extend(dept.get('objects', []))
                 elif req_mode == 'room':
                     for block in root.get('blocks', []): objects.extend(block.get('objects', []))
-            return objects
-        except: return []
+                
+                if objects:
+                    return objects
+            except Exception as e:
+                logger.error(f"Fetch error ({encoding}): {e}")
+        return []
     
     @staticmethod
     def _fetch_links_data(group_name: str, start_date: date, end_date: date) -> List[Dict]:
@@ -1015,7 +1034,14 @@ class ScheduleBot:
 
     async def search_all_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not context.args: return await update.message.reply_text("🔍 Приклад: `/search_all Коваль`")
-        results = NungParser.search_global(" ".join(context.args))
+        
+        result = NungParser.search_global(" ".join(context.args))
+        
+        if result.get("status") == "error":
+            error_msg = f"❌ <b>Помилка пошуку</b>\n\n⚠️ Суть: <code>{result['message']}</code>\n\n<i>Спробуйте пізніше або перевірте сайт деканату.</i>"
+            return await update.message.reply_text(error_msg, parse_mode=ParseMode.HTML)
+
+        results = result.get("data", [])
         if not results: return await update.message.reply_text("❌ Нічого не знайдено.")
 
         keyboard = []
