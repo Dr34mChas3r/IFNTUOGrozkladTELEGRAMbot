@@ -208,6 +208,7 @@ class ScheduleImageGenerator:
         cursor_y = 130
         if not events:
             draw.text((self.PADDING, cursor_y), "Пар немає, можна відпочивати!", font=self.font_subject, fill=self.TEXT_SEC)
+            cursor_y += 50
         else:
             for key in sorted_keys:
                 h = slot_data[key]
