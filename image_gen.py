@@ -56,14 +56,24 @@ class ScheduleImageGenerator:
         """Конвертує datetime (aware або naive UTC) до date в київському часі (UTC+3)."""
         if isinstance(dt, datetime):
             if dt.tzinfo is not None:
-                # aware datetime — конвертуємо в UTC+3
                 local_dt = dt.astimezone(timezone(timedelta(hours=3)))
             else:
-                # naive datetime — вважаємо UTC, додаємо 3 години
                 local_dt = dt + timedelta(hours=3)
             return local_dt.date()
-        # вже date
         return dt
+
+    def _sort_events_globally(self, events):
+        """Сортує події: спочатку за часом, потім за номером підгрупи."""
+        def get_sort_key(ev):
+            text = (ev.subject + str(ev.group or "")).lower()
+            sg_order = 3
+            if "підгр. 1" in text: 
+                sg_order = 1
+            elif "підгр. 2" in text: 
+                sg_order = 2
+            return (ev.start_time, sg_order)
+            
+        return sorted(events, key=get_sort_key)
 
     def _get_w(self, font, text):
         if hasattr(font, 'getlength'):
@@ -100,8 +110,8 @@ class ScheduleImageGenerator:
 
         subj_raw = event.subject
         grp_raw  = event.group if event.group else ""
-        has_sg1  = "(підгр. 1)" in subj_raw or "(підгр. 1)" in grp_raw
-        has_sg2  = "(підгр. 2)" in subj_raw or "(підгр. 2)" in grp_raw
+        has_sg1  = "підгр. 1" in subj_raw.lower() or "підгр. 1" in grp_raw.lower()
+        has_sg2  = "підгр. 2" in subj_raw.lower() or "підгр. 2" in grp_raw.lower()
         badge_h  = 45 if (is_cancelled or has_sg1 or has_sg2) else 0
 
         display_subj = event.subject
@@ -198,7 +208,8 @@ class ScheduleImageGenerator:
         draw.text((x+15, y+60), end_time.strftime('%H:%M'),   font=self.font_time, fill=self.TEXT_SEC)
 
     def create_day_image(self, events, date_obj) -> BytesIO:
-        events.sort(key=lambda x: x.start_time)
+        events = self._sort_events_globally(events)
+        
         grouped = defaultdict(list)
         for e in events:
             grouped[(e.start_time, e.end_time)].append(e)
@@ -220,7 +231,6 @@ class ScheduleImageGenerator:
         img  = Image.new('RGB', (self.WIDTH, max(400, total_h)), color=self.BG_COLOR)
         draw = ImageDraw.Draw(img)
 
-        # Нормалізуємо date_obj до локального часу
         local_date = self._to_local_date(date_obj)
 
         day_names = ['Понеділок','Вівторок','Середа','Четвер',"П'ятниця","Субота","Неділя"]
@@ -246,14 +256,23 @@ class ScheduleImageGenerator:
         return bio
 
     def _draw_matrix_card(self, draw, x, y, w, h, events_in_cell):
+        # Жорстке сортування безпосередньо перед формуванням списку для малювання
+        def get_sg_order(ev):
+            text = (ev.subject + str(ev.group or "")).lower()
+            if "підгр. 1" in text: return 1
+            if "підгр. 2" in text: return 2
+            return 3
+            
+        events_in_cell = sorted(events_in_cell, key=get_sg_order)
+
         has_sg1 = has_sg2 = has_can = False
         display_events = []
 
         for ev in events_in_cell:
             subj_raw   = ev.subject
             grp_raw    = ev.group if ev.group else ""
-            ev_has_sg1 = "(підгр. 1)" in subj_raw or "(підгр. 1)" in grp_raw
-            ev_has_sg2 = "(підгр. 2)" in subj_raw or "(підгр. 2)" in grp_raw
+            ev_has_sg1 = "підгр. 1" in subj_raw.lower() or "підгр. 1" in grp_raw.lower()
+            ev_has_sg2 = "підгр. 2" in subj_raw.lower() or "підгр. 2" in grp_raw.lower()
             is_cancelled = getattr(ev, 'is_cancelled', False)
             has_sg1 = has_sg1 or ev_has_sg1
             has_sg2 = has_sg2 or ev_has_sg2
@@ -328,8 +347,8 @@ class ScheduleImageGenerator:
         for ev in events_in_cell:
             subj_raw = ev.subject
             grp_raw  = ev.group if ev.group else ""
-            es1 = "(підгр. 1)" in subj_raw or "(підгр. 1)" in grp_raw
-            es2 = "(підгр. 2)" in subj_raw or "(підгр. 2)" in grp_raw
+            es1 = "підгр. 1" in subj_raw.lower() or "підгр. 1" in grp_raw.lower()
+            es2 = "підгр. 2" in subj_raw.lower() or "підгр. 2" in grp_raw.lower()
             display_subj = ev.subject
             if es1: display_subj += " (підгр. 1)"
             if es2: display_subj += " (підгр. 2)"
@@ -348,7 +367,8 @@ class ScheduleImageGenerator:
         return total + 12
 
     def create_week_image(self, events, start_date) -> BytesIO:
-        # Нормалізуємо start_date до локального date (UTC+3)
+        events = self._sort_events_globally(events)
+
         local_start = self._to_local_date(start_date)
         monday = local_start - timedelta(days=local_start.weekday())
 
@@ -378,11 +398,9 @@ class ScheduleImageGenerator:
         day_has_events = {d: False for d in range(cols)}
 
         for ev in events:
-            # Конвертуємо час події в локальний для визначення дня і часу пари
             local_ev_date = self._to_local_date(ev.start_time)
             d_idx = (local_ev_date - monday).days
             if 0 <= d_idx < cols:
-                # Час теж конвертуємо в локальний
                 if isinstance(ev.start_time, datetime):
                     if ev.start_time.tzinfo is not None:
                         local_dt = ev.start_time.astimezone(timezone(timedelta(hours=3)))
