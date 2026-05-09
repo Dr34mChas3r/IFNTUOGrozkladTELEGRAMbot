@@ -240,6 +240,8 @@ class ScheduleImageGenerator:
         cursor_y = 130
         if not events:
             draw.text((self.PADDING, cursor_y), "Пар немає, можна відпочивати!", font=self.font_subject, fill=self.TEXT_SEC)
+            # Додаємо висоту тексту + відступ, щоб crop не обрізав його
+            cursor_y += 80 
         else:
             for key in sorted_keys:
                 h = slot_data[key]
@@ -251,6 +253,7 @@ class ScheduleImageGenerator:
                 cursor_y += h + 40
 
         bio = BytesIO()
+        # Тепер cursor_y матиме правильне значення (130 + 80 = 210), і текст влізе повністю
         img.crop((0, 0, self.WIDTH, cursor_y + 20)).save(bio, 'PNG')
         bio.seek(0)
         return bio
