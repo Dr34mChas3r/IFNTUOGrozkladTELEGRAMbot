@@ -213,106 +213,15 @@ class UserSettings:
         return settings
 
 
-class ScheduleCache:
-    def __init__(self, cache_file: str = "schedule_cache_global.json"):
-        self.cache_file = cache_file
-        self._group_caches: Dict[str, List[ScheduleEvent]] = {}
-        self._load_cache()
-
-    def _load_cache(self):
-        try:
-            if os.path.exists(self.cache_file):
-                with open(self.cache_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    for group_id, events_data in data.items():
-                        self._group_caches[group_id] = [
-                            ScheduleEvent.from_dict(e) for e in events_data]
-        except Exception as e:
-            logger.error(f"Cache load error: {e}")
-
-    def _save_cache(self):
-        try:
-            data = {gid: [e.to_dict() for e in events]
-                    for gid, events in self._group_caches.items()}
-            with open(self.cache_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            logger.error(f"Cache save error: {e}")
-
-    def update_and_detect_changes(self, group_id: str, new_events: List[ScheduleEvent]) -> List[ScheduleChange]:
-        old_events = self._group_caches.get(group_id, [])
-        if not old_events and new_events:
-            self._group_caches[group_id] = new_events
-            self._save_cache()
-            return []
-
-        changes = []
-        old_map = {e.get_unique_key(): e for e in old_events}
-        new_map = {e.get_unique_key(): e for e in new_events}
-        now = datetime.now(TIMEZONE)
-
-        for key, ev in old_map.items():
-            if key not in new_map:
-                if ev.end_time < now:
-                    continue
-                changes.append(ScheduleChange(ChangeType.REMOVED, ev))
-            elif ev.hash != new_map[key].hash:
-                changes.append(ScheduleChange(
-                    ChangeType.MODIFIED, new_map[key], ev))
-
-        for key, ev in new_map.items():
-            if key not in old_map:
-                if ev.end_time < now:
-                    continue
-                changes.append(ScheduleChange(ChangeType.ADDED, ev))
-
-        if changes or (len(old_events) != len(new_events)):
-            self._group_caches[group_id] = new_events
-            self._save_cache()
-        return changes
-
-
-class UserManager:
-    def __init__(self, settings_file: str = "user_settings.json"):
-        self.settings_file = settings_file
-        self.users: Dict[int, UserSettings] = {}
-        self._load_settings()
-
-    def _load_settings(self):
-        try:
-            if os.path.exists(self.settings_file):
-                with open(self.settings_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    for user_data in data.get('users', []):
-                        settings = UserSettings.from_dict(user_data)
-                        self.users[settings.chat_id] = settings
-        except Exception:
-            self.users = {}
-
-    def _save_settings(self):
-        try:
-            data = {'users': [s.to_dict() for s in self.users.values()]}
-            with open(self.settings_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            logger.error(f"Settings save error: {e}")
-
-    def get_user_settings(self, chat_id: int) -> UserSettings:
-        if chat_id not in self.users:
-            self.users[chat_id] = UserSettings(chat_id)
-            self._save_settings()
-        return self.users[chat_id]
-
-    def update_user_group(self, chat_id: int, name: str, group_id: str):
-        settings = self.get_user_settings(chat_id)
-        settings.group_name = name
-        settings.group_id = group_id
-        self._save_settings()
-
-    def update_user_setting(self, chat_id: int, setting: str, value: any):
-        settings = self.get_user_settings(chat_id)
-        setattr(settings, setting, value)
-        self._save_settings()
+# --- Зберігання даних тепер у Postgres (Heroku Postgres), а не в JSON-файлах ---
+# ScheduleCache та UserManager підключаються з окремого модуля storage_postgres.py,
+# який має бути в тій самій папці, що й цей файл. Публічний інтерфейс обох класів
+# (get_user_settings, update_user_group, update_user_setting, .users,
+# update_and_detect_changes) лишився ідентичним до попередньої JSON-версії, тож
+# весь код нижче (ScheduleBot і хендлери) працює без жодних змін.
+from storage_postgres import UserManager, build_schedule_cache_class
+ScheduleCache = build_schedule_cache_class(
+    ScheduleEvent, ChangeType, ScheduleChange, TIMEZONE)
 
 # --- Parsing Logic ---
 
