@@ -35,8 +35,8 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 TIMEZONE = pytz.timezone('Europe/Kyiv')
-DAILY_NOTIFICATION_TIME = time(6, 0)
-WEEKLY_NOTIFICATION_TIME = time(16, 00)
+DAILY_NOTIFICATION_TIME = time(4, 0)
+WEEKLY_NOTIFICATION_TIME = time(14, 00)
 WEEKLY_NOTIFICATION_DAY = 0
 SCHEDULE_CHECK_INTERVAL = 30 * 60
 MAX_PINNED_MESSAGES = 5
@@ -689,7 +689,7 @@ class ScheduleBot:
         self.formatter = ScheduleFormatter()
         self.user_manager = UserManager()
         self.cache_manager = ScheduleCache()
-        self.image_generator = ScheduleImageGenerator(font_path="/usr/share/fonts/truetype/roboto/unhinted/RobotoTTF/Roboto-Regular.ttf") if ScheduleImageGenerator else None
+        self.image_generator = ScheduleImageGenerator(font_path="Roboto-Regular.ttf") if ScheduleImageGenerator else None
         self.application = None
         self._schedule_check_running = False
 
