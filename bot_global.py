@@ -18,10 +18,8 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from dotenv import load_dotenv
 import pytz
 
-# Suppress insecure HTTPS warnings when intentionally skipping SSL verification
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Імпорт генератора картинок
 try:
     from image_gen import ScheduleImageGenerator
 except ImportError:
@@ -30,7 +28,6 @@ except ImportError:
 
 load_dotenv()
 
-# --- Configuration ---
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -45,7 +42,6 @@ WEEKLY_NOTIFICATION_DAY = 0
 SCHEDULE_CHECK_INTERVAL = 30 * 60
 MAX_PINNED_MESSAGES = 5
 
-# Точний розклад дзвінків
 PAIR_TIMES = {
     1: ("08:00", "09:20"),
     2: ("09:30", "10:50"),
@@ -57,35 +53,22 @@ PAIR_TIMES = {
     8: ("18:50", "20:10")
 }
 
-# Емодзі для номерів пар
 PAIR_EMOJIS = {
-    1: "1️⃣",
-    2: "2️⃣",
-    3: "3️⃣",
-    4: "4️⃣",
-    5: "5️⃣",
-    6: "6️⃣",
-    7: "7️⃣",
-    8: "8️⃣"
+    1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣",
+    5: "5️⃣", 6: "6️⃣", 7: "7️⃣", 8: "8️⃣"
 }
 
-
 def get_pair_number(start_time) -> int:
-    """Визначає номер пари за часом початку"""
     time_str = start_time.strftime("%H:%M")
     for pair_num, (start, end) in PAIR_TIMES.items():
         if time_str == start:
             return pair_num
     return 0
 
-# --- Enums & Classes ---
-
-
 class ChangeType(Enum):
     ADDED = "added"
     REMOVED = "removed"
     MODIFIED = "modified"
-
 
 class ScheduleEvent:
     def __init__(self, data: dict):
@@ -98,37 +81,34 @@ class ScheduleEvent:
         self.links = data.get('links', [])
         self.start_time = data.get('start_time', datetime.now(TIMEZONE))
         self.end_time = data.get('end_time', datetime.now(TIMEZONE))
-
-        # Статус відміненої пари
         self.is_cancelled = data.get('is_cancelled', False)
+        
+        # ВИЗНАЧЕННЯ ВИБІРКОВИХ: Шукаємо *(в) або військову підготовку
+        self.is_elective = "*(в)" in self.raw_subject.lower() or "військова підготовка" in self.raw_subject.lower()
+        self.is_unselected = False 
 
         self.subject = self._clean_subject(self.raw_subject)
+        
+        # ЗАПОБІЖНИК: якщо після фільтрації назва пропала, повертаємо оригінал
+        if not self.subject.strip():
+            self.subject = self.raw_subject
 
-        # Додаємо маркер, якщо пару відмінено
         if self.is_cancelled:
             self.subject = f"[Увага! ЗАНЯТТЯ ВІДМІНЕНО!]{self.subject}"
 
         self.hash = self._calculate_hash()
 
     def _clean_subject(self, text: str) -> str:
-        # На випадок, якщо деканат все ж вліпить це в опис — підчищаємо
         text = re.sub(r'(?i)Увага!\s*Заняття\s*відмінено!?\s*', '', text)
         text = re.sub(r'(?i)дистанційно', '', text)
-
         if self.event_type:
             escaped_type = re.escape(self.event_type)
-            text = re.sub(fr'\({escaped_type}\)', '',
-                          text, flags=re.IGNORECASE)
+            text = re.sub(fr'\({escaped_type}\)', '', text, flags=re.IGNORECASE)
         if self.teacher:
             text = text.replace(self.teacher, '')
-
-        # Видаляємо підгрупу з назви предмету
         text = re.sub(r'\(підгр\.\s*\d+\)', '', text)
-
-        text = re.sub(
-            r'(доцент|професор|викладач|асистент|зав\.каф\.)\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+(\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+)?', '', text)
-        text = re.sub(
-            r'(доцент|професор|викладач|асистент|зав\.каф\.)\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+\s+[A-ZА-ЯІЇЄ]\.([A-ZА-ЯІЇЄ]\.)?', '', text)
+        text = re.sub(r'(доцент|професор|викладач|асистент|зав\.каф\.)\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+(\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+)?', '', text)
+        text = re.sub(r'(доцент|професор|викладач|асистент|зав\.каф\.)\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+\s+[A-ZА-ЯІЇЄ]\.([A-ZА-ЯІЇЄ]\.)?', '', text)
         text = re.sub(r'\d+[^\s]*\.ауд\.', '', text)
         text = text.replace('*', '').strip()
         text = re.sub(r'\s+', ' ', text)
@@ -169,17 +149,12 @@ class ScheduleEvent:
                 q in self.room.lower() or
                 q in self.event_type.lower() or
                 q in self.group.lower())
-
-
 class ScheduleChange:
     def __init__(self, change_type: ChangeType, event: ScheduleEvent, old_event: Optional[ScheduleEvent] = None):
         self.change_type = change_type
         self.event = event
         self.old_event = old_event
-
-# --- User Settings & Cache ---
-
-
+        
 class UserSettings:
     def __init__(self, chat_id: int):
         self.chat_id = chat_id
@@ -189,6 +164,7 @@ class UserSettings:
         self.daily_notifications = False
         self.weekly_notifications = False
         self.pinned_messages: List[int] = []
+        self.disabled_electives: List[str] = []
 
     def to_dict(self) -> dict:
         return {
@@ -198,7 +174,8 @@ class UserSettings:
             'change_notifications': self.change_notifications,
             'daily_notifications': self.daily_notifications,
             'weekly_notifications': self.weekly_notifications,
-            'pinned_messages': self.pinned_messages
+            'pinned_messages': self.pinned_messages,
+            'disabled_electives': self.disabled_electives
         }
 
     @classmethod
@@ -210,25 +187,15 @@ class UserSettings:
         settings.daily_notifications = data.get('daily_notifications', False)
         settings.weekly_notifications = data.get('weekly_notifications', False)
         settings.pinned_messages = data.get('pinned_messages', [])
+        settings.disabled_electives = data.get('disabled_electives', [])
         return settings
 
-
-# --- Зберігання даних тепер у Postgres (Heroku Postgres), а не в JSON-файлах ---
-# ScheduleCache та UserManager підключаються з окремого модуля storage_postgres.py,
-# який має бути в тій самій папці, що й цей файл. Публічний інтерфейс обох класів
-# (get_user_settings, update_user_group, update_user_setting, .users,
-# update_and_detect_changes) лишився ідентичним до попередньої JSON-версії, тож
-# весь код нижче (ScheduleBot і хендлери) працює без жодних змін.
 from storage_postgres import UserManager, build_schedule_cache_class
 ScheduleCache = build_schedule_cache_class(
     ScheduleEvent, ChangeType, ScheduleChange, TIMEZONE)
 
-# --- Parsing Logic ---
-
-
 class NungParser:
     API_URL = "https://dekanat.nung.edu.ua/cgi-bin/timetable_export.cgi"
-    # disabled links parsing due to incorrect working. I do not want fix it and i dont know how to fix it.
     HTML_URL = "https://example.com"
     _global_cache = {'teachers': [], 'rooms': [], 'timestamp': None}
 
@@ -236,28 +203,39 @@ class NungParser:
     def _normalize(text):
         if not text:
             return ""
-        text = text.lower().replace("–", "-").replace("—", "-").replace(" ",
-                                                                        "").replace("`", "").replace("'", "").replace("'", "")
+        text = text.lower().replace("–", "-").replace("—", "-").replace(" ", "").replace("`", "").replace("'", "").replace("'", "")
         trans_table = str.maketrans({'i': 'і', 'k': 'к', 'c': 'с', 'o': 'о', 'p': 'р',
                                     'x': 'х', 'a': 'а', 'e': 'е', 'h': 'н', 't': 'т', 'm': 'м', 'b': 'в'})
         return text.translate(trans_table)
+
 
     @staticmethod
     def get_group_id(group_name: str) -> Optional[str]:
         params = {'req_type': 'obj_list', 'req_mode': 'group', 'show_ID': 'yes',
                   'req_format': 'json', 'coding_mode': 'WINDOWS-1251', 'bs': 'ok'}
+        
+        # ДОДАЄМО МАСКУВАННЯ ПІД БРАУЗЕР
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+        
         try:
-            response = requests.get(
-                NungParser.API_URL, params=params, timeout=10, verify=False)
+            # Передаємо headers у запит
+            response = requests.get(NungParser.API_URL, params=params, headers=headers, timeout=10, verify=False)
             try:
                 data = response.json()
             except:
                 response = requests.get(NungParser.API_URL, params={
-                                        **params, 'coding_mode': 'UTF-8'}, timeout=10, verify=False)
+                                        **params, 'coding_mode': 'UTF-8'}, headers=headers, timeout=10, verify=False)
                 data = response.json()
+                
+            # Перевіряємо, чи деканат не віддав помилку у форматі JSON (наприклад, code: -8)
+            if isinstance(data, dict) and 'code' in data and int(data['code']) < 0:
+                logger.warning(f"Деканат віддав помилку: {data.get('error_message')}")
+                return None
+
             target = NungParser._normalize(group_name)
-            root = data.get('psrozklad_export') or data.get(
-                'ps_rozklad_export')
+            root = data.get('psrozklad_export') or data.get('ps_rozklad_export')
             if root:
                 for dept in root.get('departments', []):
                     for obj in dept.get('objects', []):
@@ -268,18 +246,16 @@ class NungParser:
             logger.error(f"Group Search Error: {e}")
             return None
 
+
     @staticmethod
     def search_global(query: str) -> Dict:
         now = datetime.now()
-        # Оновлюємо кеш тільки якщо він порожній АБО минула година
         if not NungParser._global_cache['teachers'] or not NungParser._global_cache['timestamp'] or (now - NungParser._global_cache['timestamp']).seconds > 3600:
             try:
                 t_data = NungParser._fetch_objects('teacher')
                 r_data = NungParser._fetch_objects('room')
-
                 if not t_data and not r_data:
                     return {"status": "error", "message": "Сервер деканату не надіслав дані (Timeout/Empty)"}
-
                 NungParser._global_cache['teachers'] = t_data
                 NungParser._global_cache['rooms'] = r_data
                 NungParser._global_cache['timestamp'] = now
@@ -306,11 +282,9 @@ class NungParser:
             params = {'req_type': 'obj_list', 'req_mode': req_mode, 'show_ID': 'yes',
                       'req_format': 'json', 'coding_mode': encoding, 'bs': 'ok'}
             try:
-                response = requests.get(
-                    NungParser.API_URL, params=params, timeout=25, verify=False)
+                response = requests.get(NungParser.API_URL, params=params, timeout=25, verify=False)
                 data = response.json()
-                root = data.get('psrozklad_export') or data.get(
-                    'ps_rozklad_export')
+                root = data.get('psrozklad_export') or data.get('ps_rozklad_export')
                 if not root:
                     continue
 
@@ -348,8 +322,7 @@ class NungParser:
                 'edate': end_date.strftime('%d.%m.%Y')
             }
 
-            response = requests.post(
-                NungParser.HTML_URL, data=payload, headers=headers, timeout=8, verify=False)
+            response = requests.post(NungParser.HTML_URL, data=payload, headers=headers, timeout=8, verify=False)
             response.encoding = 'windows-1251'
             soup = BeautifulSoup(response.text, 'html.parser')
 
@@ -370,8 +343,7 @@ class NungParser:
                     if isinstance(curr, str):
                         text_chunks.append(curr.strip())
                     elif curr.name not in ['br', 'img']:
-                        text_chunks.append(curr.get_text(
-                            separator=' ', strip=True))
+                        text_chunks.append(curr.get_text(separator=' ', strip=True))
                     curr = curr.previous_sibling
 
                 isolated_text = " ".join(reversed(text_chunks)).strip()
@@ -382,8 +354,7 @@ class NungParser:
                     if table:
                         h4 = table.find_previous('h4')
                         if h4:
-                            date_match = re.search(
-                                r'\d{2}\.\d{2}\.\d{4}', h4.get_text())
+                            date_match = re.search(r'\d{2}\.\d{2}\.\d{4}', h4.get_text())
                             if date_match:
                                 date_str = date_match.group(0)
 
@@ -391,8 +362,7 @@ class NungParser:
                     if tr:
                         tds = tr.find_all('td')
                         if len(tds) >= 2:
-                            time_match = re.search(
-                                r'\d{2}:\d{2}', tds[1].get_text(separator=' '))
+                            time_match = re.search(r'\d{2}:\d{2}', tds[1].get_text(separator=' '))
                             if time_match:
                                 time_str = time_match.group(0)
                 except Exception:
@@ -404,10 +374,8 @@ class NungParser:
                     'date': date_str,
                     'time': time_str
                 })
-
         except Exception as e:
             logger.error(f"HTML Link Parsing Error: {e}")
-
         return links_data
 
     @staticmethod
@@ -419,8 +387,7 @@ class NungParser:
 
         links_data = []
         if obj_type == 'group' and group_name:
-            links_data = NungParser._fetch_links_data(
-                group_name, start_date, end_date)
+            links_data = NungParser._fetch_links_data(group_name, start_date, end_date)
 
         return NungParser.get_schedule_json(obj_id, obj_type, start_date, end_date, links_data)
 
@@ -442,14 +409,12 @@ class NungParser:
                 if room_match:
                     split_point = search_start + room_match.end()
                 else:
-                    teacher_match = re.search(
-                        r'[A-ZА-ЯІЇЄ]\.[A-ZА-ЯІЇЄ]\.', segment)
+                    teacher_match = re.search(r'[A-ZА-ЯІЇЄ]\.[A-ZА-ЯІЇЄ]\.', segment)
                     if teacher_match:
                         split_point = search_start + teacher_match.end()
                     else:
                         split_point = next_match.start()
-                        last_caps = list(re.finditer(
-                            r'[A-ZА-ЯІЇЄ][a-zа-яіїє]+', segment))
+                        last_caps = list(re.finditer(r'[A-ZА-ЯІЇЄ][a-zа-яіїє]+', segment))
                         if last_caps:
                             split_point = search_start + last_caps[-1].start()
             else:
@@ -468,13 +433,20 @@ class NungParser:
             'end_date': end_date.strftime('%d.%m.%Y'), 'req_format': 'json', 'coding_mode': 'UTF8', 'bs': 'ok'
         }
         try:
-            response = requests.get(
-                NungParser.API_URL, params=params, timeout=15, verify=False)
+            response = requests.get(NungParser.API_URL, params=params, timeout=15, verify=False)
             response.encoding = 'utf-8'
             data = response.json()
+            
+            # ОБРОБКА ПОМИЛОК ДЕКАНАТУ
+            if 'code' in data:
+                err_code = int(data['code'])
+                if err_code < 0:
+                    err_msg = data.get('error_message', 'Невідома помилка сервера')
+                    logger.warning(f"API Деканату повернуло помилку {err_code}: {err_msg}")
+                    return [] # Повертаємо пустий список, щоб бот підняв локальний кеш
+
             events = []
-            root = data.get('psrozklad_export') or data.get(
-                'ps_rozklad_export')
+            root = data.get('psrozklad_export') or data.get('ps_rozklad_export')
             items = root.get('roz_items', []) if root else []
 
             for item in items:
@@ -483,7 +455,6 @@ class NungParser:
 
                 descriptions = NungParser._split_merged_events(original_desc)
                 json_link = item.get('link') or item.get('url') or ""
-
                 has_multiple_subgroups = len(descriptions) > 1
 
                 for description in descriptions:
@@ -492,88 +463,68 @@ class NungParser:
                     if len(time_range) != 2:
                         continue
                     try:
-                        date_obj = datetime.strptime(
-                            date_str, '%d.%m.%Y').date()
-                        start_time = datetime.strptime(
-                            time_range[0].strip(), '%H:%M').time()
-                        end_time = datetime.strptime(
-                            time_range[1].strip(), '%H:%M').time()
-                        start_dt = TIMEZONE.localize(
-                            datetime.combine(date_obj, start_time))
-                        end_dt = TIMEZONE.localize(
-                            datetime.combine(date_obj, end_time))
+                        date_obj = datetime.strptime(date_str, '%d.%m.%Y').date()
+                        start_time = datetime.strptime(time_range[0].strip(), '%H:%M').time()
+                        end_time = datetime.strptime(time_range[1].strip(), '%H:%M').time()
+                        start_dt = TIMEZONE.localize(datetime.combine(date_obj, start_time))
+                        end_dt = TIMEZONE.localize(datetime.combine(date_obj, end_time))
                     except ValueError:
                         continue
 
                     room = item.get('room') or ""
                     if not room:
-                        room_match = re.search(
-                            r'(\d+[^\s]*\.ауд\.)', description)
+                        room_match = re.search(r'(\d+[^\s]*\.ауд\.)', description)
                         if room_match:
                             room = room_match.group(1)
 
                     event_type = item.get('type') or ""
                     if not event_type:
-                        type_match = re.search(
-                            r'\((Л|Пр|Лаб|Л\+Пр|Sem|Екз|Конс)\)', description)
+                        type_match = re.search(r'\((Л|Пр|Лаб|Л\+Пр|Sem|Екз|Конс)\)', description)
                         if type_match:
                             event_type = type_match.group(1)
 
                     clean_text = description.replace('*', '').strip()
                     teacher_name = item.get('teacher') or ""
-
                     base_group = item.get('object') or ""
                     subgroup_info = item.get('group') or ""
 
                     if obj_mode == 'group':
-                        group_name = f"{base_group} {subgroup_info}".strip(
-                        ) if subgroup_info else base_group
+                        group_name = f"{base_group} {subgroup_info}".strip() if subgroup_info else base_group
                     else:
                         group_name = base_group
                         if not group_name:
-                            gm = re.search(
-                                r'([A-ZА-ЯІЇЄ]{2,4}-\d{2}-\d)', clean_text)
+                            gm = re.search(r'([A-ZА-ЯІЇЄ]{2,4}-\d{2}-\d)', clean_text)
                             if gm:
                                 group_name = gm.group(0)
                         if subgroup_info:
                             group_name = f"{group_name} {subgroup_info}".strip()
 
                     if not teacher_name and obj_mode == 'group':
-                        tm = re.search(
-                            r'(доцент|професор|викладач|асистент|зав\.каф\.)\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+(\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+)?', clean_text)
+                        tm = re.search(r'(доцент|професор|викладач|асистент|зав\.каф\.)\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+(\s+[A-ZА-ЯІЇЄ][a-zа-яіїє\']+)?', clean_text)
                         if tm:
                             teacher_name = tm.group(0)
 
-                    is_remote = (item.get('online') in [
-                                 'Tak', 'Yes', '1', 'Так', 'True']) or "дистанційно" in clean_text.lower()
-                    clean_text = re.sub(r'(?i)дистанційно',
-                                        '', clean_text).strip()
+                    is_remote = (item.get('online') in ['Tak', 'Yes', '1', 'Так', 'True']) or "дистанційно" in clean_text.lower()
+                    clean_text = re.sub(r'(?i)дистанційно', '', clean_text).strip()
                     if not clean_text and item.get('title'):
                         clean_text = item.get('title')
 
-                    # --- ОСЬ ТУТ ЛОВИМО СТАТУС ВІДМІНИ З ПОЛЯ "replacement" ---
-                    is_cancelled = "відмінено" in str(
-                        item.get('replacement', '')).lower()
-
+                    is_cancelled = "відмінено" in str(item.get('replacement', '')).lower()
                     final_links = []
 
                     if links_data and teacher_name:
                         event_date_str = start_dt.strftime('%d.%m.%Y')
                         event_time_str = start_dt.strftime('%H:%M')
 
-                        cell_links = [ld for ld in links_data if ld['date']
-                                      == event_date_str and ld['time'] == event_time_str]
+                        cell_links = [ld for ld in links_data if ld['date'] == event_date_str and ld['time'] == event_time_str]
                         if not cell_links:
                             cell_links = links_data
 
-                        clean_teacher = re.sub(
-                            r'(?i)(доцент|професор|викладач|асистент|зав\.каф\.)', '', teacher_name)
+                        clean_teacher = re.sub(r'(?i)(доцент|професор|викладач|асистент|зав\.каф\.)', '', teacher_name)
                         clean_teacher = clean_teacher.replace('*', '').strip()
-                        norm_teacher = NungParser._normalize(
-                            clean_teacher.split()[0]) if clean_teacher else ""
+                        norm_teacher = NungParser._normalize(clean_teacher.split()[0]) if clean_teacher else ""
 
-                        subj_words = [NungParser._normalize(
-                            w) for w in clean_text.split() if len(NungParser._normalize(w)) > 3]
+                        subj_words = [NungParser._normalize(w) for w in clean_text.split() if len(NungParser._normalize(w)) > 3]
 
                         best_match_link = None
                         best_score = -1
@@ -581,21 +532,16 @@ class NungParser:
                         for ld in cell_links:
                             norm_cell = NungParser._normalize(ld['text'])
                             score = 0
-
                             if norm_teacher and norm_teacher in norm_cell:
                                 score += 5
-
                             for w in subj_words:
                                 if w in norm_cell:
                                     score += 2
-
                             if event_type:
                                 norm_type = NungParser._normalize(event_type)
                                 if norm_type in norm_cell:
                                     score += 3
-
-                            subg_match = re.search(r'підгр\.\s*(\d+)', group_name.lower()) or re.search(
-                                r'підгр\.\s*(\d+)', subgroup_info.lower())
+                            subg_match = re.search(r'підгр\.\s*(\d+)', group_name.lower()) or re.search(r'підгр\.\s*(\d+)', subgroup_info.lower())
                             if subg_match:
                                 subg_num = subg_match.group(1)
                                 if f"підгр. {subg_num}" in ld['text'].lower() or f"підгр.{subg_num}" in ld['text'].lower() or f"({subg_num})" in norm_cell:
@@ -613,11 +559,16 @@ class NungParser:
                     if not final_links and json_link and not has_multiple_subgroups:
                         final_links.append(json_link)
 
+                    # Зберігаємо оригінал для вибіркових, щоб не втратити назву
+                    is_elective_raw = "*(в)" in original_desc.lower() or "військова підготовка" in original_desc.lower()
+                    subject_to_save = original_desc if is_elective_raw else (clean_text or original_desc)
+
                     event_data = {
-                        'subject': clean_text, 'type': event_type, 'teacher': teacher_name,
+                        'subject': subject_to_save, 
+                        'type': event_type, 'teacher': teacher_name,
                         'room': room, 'group': group_name, 'is_remote': is_remote, 'links': final_links,
                         'start_time': start_dt, 'end_time': end_dt,
-                        'is_cancelled': is_cancelled  # Передаємо прапорець у подію
+                        'is_cancelled': is_cancelled
                     }
                     events.append(ScheduleEvent(event_data))
 
@@ -627,37 +578,42 @@ class NungParser:
             logger.error(f"JSON Parse Error: {e}")
             return []
 
-
 class ScheduleFormatter:
     @classmethod
     def _build_event_details(cls, event: ScheduleEvent, strikethrough: bool = False) -> str:
         lines = []
         subj_line = f"📚 {event.subject}"
+        
+        if event.is_unselected:
+             subj_line = f"📓 [НЕ ОБРАНО] {event.subject}"
+             
         if event.group:
             subj_line += f" {event.group}"
         if event.event_type:
             subj_line += f" ({event.event_type})"
+            
         if strikethrough:
             lines.append(f"<s>{subj_line}</s>")
         else:
-            if event.is_remote:
+            if event.is_remote and not event.is_unselected:
                 lines.append("💻🏡 <b>ДИСТАНЦІЙНО</b>")
             lines.append(subj_line)
-            if event.teacher:
-                lines.append(f"👤🎓 {event.teacher}")
-            if event.room:
-                lines.append(f"📍 {event.room}")
-
-            if event.links:
-                for link in event.links:
-                    link_name = "Посилання на пару 🔗"
-                    if "zoom" in link:
-                        link_name = "Zoom 🎥"
-                    elif "meet.google" in link:
-                        link_name = "Google Meet 🎥"
-                    elif "teams" in link:
-                        link_name = "Teams 🎥"
-                    lines.append(f'<a href="{link}">{link_name}</a>')
+            
+            if not event.is_unselected:
+                if event.teacher:
+                    lines.append(f"👤🎓 {event.teacher}")
+                if event.room:
+                    lines.append(f"📍 {event.room}")
+                if event.links:
+                    for link in event.links:
+                        link_name = "Посилання на пару 🔗"
+                        if "zoom" in link:
+                            link_name = "Zoom 🎥"
+                        elif "meet.google" in link:
+                            link_name = "Google Meet 🎥"
+                        elif "teams" in link:
+                            link_name = "Teams 🎥"
+                        lines.append(f'<a href="{link}">{link_name}</a>')
 
         return "\n".join(lines)
 
@@ -669,8 +625,7 @@ class ScheduleFormatter:
         for c in changes:
             d_str = c.event.start_time.strftime('%d.%m')
             time_s = c.event.start_time.strftime('%H:%M')
-            details = cls._build_event_details(
-                c.event, strikethrough=(c.change_type == ChangeType.REMOVED))
+            details = cls._build_event_details(c.event, strikethrough=(c.change_type == ChangeType.REMOVED))
             if c.change_type == ChangeType.ADDED:
                 res += f"✅ <b>Додано ({d_str} | {time_s}):</b>\n{details}\n\n"
             elif c.change_type == ChangeType.REMOVED:
@@ -695,25 +650,20 @@ class ScheduleFormatter:
             text = text[split_pos:].lstrip()
         return parts
 
-
 class ScheduleBot:
     def __init__(self):
         self.formatter = ScheduleFormatter()
         self.user_manager = UserManager()
         self.cache_manager = ScheduleCache()
-        self.image_generator = ScheduleImageGenerator(
-            font_path="Roboto-Regular.ttf") if ScheduleImageGenerator else None
+        self.image_generator = ScheduleImageGenerator(font_path="Roboto-Regular.ttf") if ScheduleImageGenerator else None
         self.application = None
         self._schedule_check_running = False
 
     def set_application(self, application):
         self.application = application
-        self.application.job_queue.run_daily(
-            self._daily_notification_job, time=DAILY_NOTIFICATION_TIME)
-        self.application.job_queue.run_daily(
-            self._weekly_notification_job, time=WEEKLY_NOTIFICATION_TIME, days=[WEEKLY_NOTIFICATION_DAY])
-        self.application.job_queue.run_repeating(
-            self._check_schedule_changes_job, interval=SCHEDULE_CHECK_INTERVAL, first=30)
+        self.application.job_queue.run_daily(self._daily_notification_job, time=DAILY_NOTIFICATION_TIME)
+        self.application.job_queue.run_daily(self._weekly_notification_job, time=WEEKLY_NOTIFICATION_TIME, days=[WEEKLY_NOTIFICATION_DAY])
+        self.application.job_queue.run_repeating(self._check_schedule_changes_job, interval=SCHEDULE_CHECK_INTERVAL, first=30)
 
     async def _is_user_admin(self, update: Update) -> bool:
         if update.effective_chat.type == ChatType.PRIVATE:
@@ -725,7 +675,24 @@ class ScheduleBot:
             return False
 
     def _get_events(self, group_id: str, group_name: str = None, start_date: date = None, end_date: date = None) -> List[ScheduleEvent]:
-        return NungParser.get_schedule(group_id, start_date=start_date, end_date=end_date, obj_type='group', group_name=group_name)
+        events = NungParser.get_schedule(group_id, start_date=start_date, end_date=end_date, obj_type='group', group_name=group_name)
+        
+        # FALLBACK: Якщо сервер лежить, дістаємо з бази
+        if not events:
+            logger.warning(f"Сервер не віддав розклад для {group_id}. Використовуємо локальний кеш.")
+            cached_events = self.cache_manager._group_caches.get(group_id, [])
+            if cached_events and start_date and end_date:
+                events = [e for e in cached_events if start_date <= e.start_time.date() <= end_date]
+            else:
+                events = cached_events
+                
+        return events
+
+    def _apply_elective_filters(self, events: List[ScheduleEvent], chat_id: int):
+        s = self.user_manager.get_user_settings(chat_id)
+        for e in events:
+            if e.is_elective and e.subject in s.disabled_electives:
+                e.is_unselected = True
 
     async def _pin_message_with_management(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int):
         settings = self.user_manager.get_user_settings(chat_id)
@@ -738,27 +705,26 @@ class ScheduleBot:
                     await context.bot.unpin_chat_message(chat_id=chat_id, message_id=oldest_message_id)
                 except Exception as e:
                     logger.warning(f"Unpin error: {e}")
-            self.user_manager.update_user_setting(
-                chat_id, 'pinned_messages', settings.pinned_messages)
+            self.user_manager.update_user_setting(chat_id, 'pinned_messages', settings.pinned_messages)
         except Exception as e:
             logger.error(f"Pin error: {e}")
 
-    # --- Jobs ---
     async def _weekly_notification_job(self, context: ContextTypes.DEFAULT_TYPE):
-        users = [uid for uid, s in self.user_manager.users.items()
-                 if s.weekly_notifications]
+        users = [uid for uid, s in self.user_manager.users.items() if s.weekly_notifications]
         tomorrow = datetime.now(TIMEZONE).date() + timedelta(days=1)
         for chat_id in users:
             s = self.user_manager.get_user_settings(chat_id)
             if not s.group_id:
                 continue
-            events = NungParser.get_schedule(
-                s.group_id, start_date=tomorrow, end_date=tomorrow + timedelta(days=6), group_name=s.group_name)
+            
+            events = self._get_events(s.group_id, s.group_name, start_date=tomorrow, end_date=tomorrow + timedelta(days=6))
             if not events:
                 continue
+                
+            self._apply_elective_filters(events, chat_id)
+            
             if self.image_generator:
-                photo_bio = self.image_generator.create_week_image(
-                    events, tomorrow)
+                photo_bio = self.image_generator.create_week_image(events, tomorrow)
                 try:
                     msg = await context.bot.send_photo(chat_id=chat_id, photo=photo_bio, caption=f"📅 Тиждень: {s.group_name}")
                     await self._pin_message_with_management(context, chat_id, msg.message_id)
@@ -767,25 +733,24 @@ class ScheduleBot:
 
     async def _daily_notification_job(self, context: ContextTypes.DEFAULT_TYPE):
         today = datetime.now(TIMEZONE).date()
-        users = [uid for uid, s in self.user_manager.users.items()
-                 if s.daily_notifications]
+        users = [uid for uid, s in self.user_manager.users.items() if s.daily_notifications]
         for chat_id in users:
             s = self.user_manager.get_user_settings(chat_id)
             if not s.group_id:
                 continue
 
-            events = NungParser.get_schedule(
-                s.group_id, start_date=today, end_date=today, group_name=s.group_name)
+            events = self._get_events(s.group_id, s.group_name, start_date=today, end_date=today)
             if not events:
                 continue
 
+            self._apply_elective_filters(events, chat_id)
+
             if self.image_generator:
-                photo_bio = self.image_generator.create_day_image(
-                    events, today)
+                photo_bio = self.image_generator.create_day_image(events, today)
 
                 subject_links = {}
                 for e in events:
-                    if not e.links:
+                    if not e.links or getattr(e, 'is_unselected', False):
                         continue
                     for link in e.links:
                         key = (e.subject, e.group)
@@ -802,12 +767,7 @@ class ScheduleBot:
                             time_key = start_time.strftime("%H:%M")
                             if time_key not in time_grouped:
                                 time_grouped[time_key] = []
-                            time_grouped[time_key].append({
-                                'subject': subject,
-                                'group': group,
-                                'link': link,
-                                'start_time': start_time
-                            })
+                            time_grouped[time_key].append({'subject': subject, 'group': group, 'link': link, 'start_time': start_time})
 
                 sorted_times = sorted(time_grouped.keys())
 
@@ -820,8 +780,7 @@ class ScheduleBot:
                     time_subject_count = {}
                     for item in items:
                         subj = item['subject']
-                        time_subject_count[subj] = time_subject_count.get(
-                            subj, 0) + 1
+                        time_subject_count[subj] = time_subject_count.get(subj, 0) + 1
 
                     for idx, item in enumerate(items):
                         subject = item['subject']
@@ -832,42 +791,33 @@ class ScheduleBot:
                         if time_subject_count[subject] > 1 and group:
                             subject_display = f"{subject} {group}"
 
-                        link_name = "Meet 🎥" if "meet" in link else (
-                            "Zoom 🎥" if "zoom" in link else "🔗")
+                        link_name = "Meet 🎥" if "meet" in link else ("Zoom 🎥" if "zoom" in link else "🔗")
 
                         if idx == 0:
-                            links_text_lines.append(
-                                f"{pair_emoji} {subject_display}: <a href=\"{link}\">{link_name}</a>")
+                            links_text_lines.append(f"{pair_emoji} {subject_display}: <a href=\"{link}\">{link_name}</a>")
                         else:
-                            links_text_lines.append(
-                                f"{'   '} {subject_display}: <a href=\"{link}\">{link_name}</a>")
+                            links_text_lines.append(f"{'   '} {subject_display}: <a href=\"{link}\">{link_name}</a>")
 
                 caption = f"📅 Сьогодні: {s.group_name}"
                 if links_text_lines:
-                    caption += "\n\n🔗 <b>Посилання на пари:</b>\n" + \
-                        "\n".join(links_text_lines)
+                    caption += "\n\n🔗 <b>Посилання на пари:</b>\n" + "\n".join(links_text_lines)
 
                 other_links = []
                 for e in events:
-                    if not e.links:
+                    if not e.links or getattr(e, 'is_unselected', False):
                         continue
                     for link in e.links:
                         if any(x in link.lower() for x in ['zoom.us', 'meet.google', 'teams.microsoft', 'webex']):
                             continue
                         pair_num = get_pair_number(e.start_time)
                         pair_emoji = PAIR_EMOJIS.get(pair_num, "📎")
-
-                        subject_short = e.subject[:30] + \
-                            "..." if len(e.subject) > 30 else e.subject
+                        subject_short = e.subject[:30] + "..." if len(e.subject) > 30 else e.subject
                         if e.group and len(events) > 1:
                             subject_short = f"{subject_short} {e.group}"
-
-                        other_links.append(
-                            f"{pair_emoji} {subject_short}: <a href=\"{link}\">📄 Матеріали</a>")
+                        other_links.append(f"{pair_emoji} {subject_short}: <a href=\"{link}\">📄 Матеріали</a>")
 
                 if other_links:
-                    caption += "\n\n📚 <b>Додаткові матеріали:</b>\n" + \
-                        "\n".join(other_links)
+                    caption += "\n\n📚 <b>Додаткові матеріали:</b>\n" + "\n".join(other_links)
 
                 try:
                     msg = await context.bot.send_photo(chat_id=chat_id, photo=photo_bio, caption=caption, parse_mode=ParseMode.HTML)
@@ -886,23 +836,19 @@ class ScheduleBot:
                     active_groups[s.group_id] = s.group_name
 
             for group_id, group_name in active_groups.items():
-                new_events = NungParser.get_schedule(
-                    group_id, obj_type='group', group_name=group_name)
+                new_events = NungParser.get_schedule(group_id, obj_type='group', group_name=group_name)
 
                 if not new_events:
-                    old_events = self.cache_manager._group_caches.get(
-                        group_id, [])
+                    old_events = self.cache_manager._group_caches.get(group_id, [])
                     if old_events:
                         continue
 
-                changes = self.cache_manager.update_and_detect_changes(
-                    group_id, new_events)
+                changes = self.cache_manager.update_and_detect_changes(group_id, new_events)
                 if changes:
                     text_changes = self.formatter.format_changes(changes)
                     if not text_changes.strip():
                         continue
-                    targets = [uid for uid, s in self.user_manager.users.items(
-                    ) if s.group_id == group_id and s.change_notifications]
+                    targets = [uid for uid, s in self.user_manager.users.items() if s.group_id == group_id and s.change_notifications]
                     for chat_id in targets:
                         try:
                             msg = await context.bot.send_message(chat_id=chat_id, text=text_changes, parse_mode=ParseMode.HTML, disable_notification=True)
@@ -914,7 +860,6 @@ class ScheduleBot:
         finally:
             self._schedule_check_running = False
 
-    # --- Commands ---
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         s = self.user_manager.get_user_settings(update.effective_chat.id)
         msg = f"👋 Привіт!\n"
@@ -932,10 +877,8 @@ class ScheduleBot:
         group_name = " ".join(context.args)
         group_id = NungParser.get_group_id(group_name)
         if group_id:
-            self.user_manager.update_user_group(
-                update.effective_chat.id, group_name.upper(), group_id)
-            events = NungParser.get_schedule(
-                group_id, obj_type='group', group_name=group_name.upper())
+            self.user_manager.update_user_group(update.effective_chat.id, group_name.upper(), group_id)
+            events = NungParser.get_schedule(group_id, obj_type='group', group_name=group_name.upper())
             self.cache_manager.update_and_detect_changes(group_id, events)
             await update.message.reply_text(f"✅ Збережено: <b>{group_name.upper()}</b>", parse_mode=ParseMode.HTML, reply_markup=self.get_main_keyboard())
         else:
@@ -945,8 +888,7 @@ class ScheduleBot:
         if not self.image_generator:
             text_response = caption + "\n\n"
             for e in events:
-                text_response += self.formatter._build_event_details(
-                    e) + "\n\n"
+                text_response += self.formatter._build_event_details(e) + "\n\n"
             if update.callback_query:
                 await update.callback_query.message.edit_text(text_response, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
             else:
@@ -960,7 +902,7 @@ class ScheduleBot:
 
         subject_links = {}
         for e in events:
-            if not e.links:
+            if not e.links or getattr(e, 'is_unselected', False):
                 continue
             for link in e.links:
                 key = (e.subject, e.group)
@@ -977,12 +919,7 @@ class ScheduleBot:
                     time_key = start_time.strftime("%d.%m %H:%M")
                     if time_key not in time_grouped:
                         time_grouped[time_key] = []
-                    time_grouped[time_key].append({
-                        'subject': subject,
-                        'group': group,
-                        'link': link,
-                        'start_time': start_time
-                    })
+                    time_grouped[time_key].append({'subject': subject, 'group': group, 'link': link, 'start_time': start_time})
 
         sorted_times = sorted(time_grouped.keys())
 
@@ -1006,42 +943,32 @@ class ScheduleBot:
                 if time_subject_count[subject] > 1 and group:
                     subject_display = f"{subject} {group}"
 
-                link_name = "Meet 🎥" if "meet" in link else (
-                    "Zoom 🎥" if "zoom" in link else "🔗")
-
+                link_name = "Meet 🎥" if "meet" in link else ("Zoom 🎥" if "zoom" in link else "🔗")
                 if idx == 0:
-                    links_text_lines.append(
-                        f"{pair_emoji} {subject_display}: <a href=\"{link}\">{link_name}</a>")
+                    links_text_lines.append(f"{pair_emoji} {subject_display}: <a href=\"{link}\">{link_name}</a>")
                 else:
-                    links_text_lines.append(
-                        f"{'   '} {subject_display}: <a href=\"{link}\">{link_name}</a>")
+                    links_text_lines.append(f"{'   '} {subject_display}: <a href=\"{link}\">{link_name}</a>")
 
         full_caption = caption
         if links_text_lines:
-            full_caption += "\n\n🔗 <b>Посилання на пари:</b>\n" + \
-                "\n".join(links_text_lines)
+            full_caption += "\n\n🔗 <b>Посилання на пари:</b>\n" + "\n".join(links_text_lines)
 
         other_links = []
         for e in events:
-            if not e.links:
+            if not e.links or getattr(e, 'is_unselected', False):
                 continue
             for link in e.links:
                 if any(x in link.lower() for x in ['zoom.us', 'meet.google', 'teams.microsoft', 'webex']):
                     continue
                 pair_num = get_pair_number(e.start_time)
                 pair_emoji = PAIR_EMOJIS.get(pair_num, "📎")
-
-                subject_short = e.subject[:30] + \
-                    "..." if len(e.subject) > 30 else e.subject
+                subject_short = e.subject[:30] + "..." if len(e.subject) > 30 else e.subject
                 if e.group and len(events) > 1:
                     subject_short = f"{subject_short} {e.group}"
-
-                other_links.append(
-                    f"{pair_emoji} {subject_short}: <a href=\"{link}\">📄 Матеріали</a>")
+                other_links.append(f"{pair_emoji} {subject_short}: <a href=\"{link}\">📄 Матеріали</a>")
 
         if other_links:
-            full_caption += "\n\n📚 <b>Додаткові матеріали:</b>\n" + \
-                "\n".join(other_links)
+            full_caption += "\n\n📚 <b>Додаткові матеріали:</b>\n" + "\n".join(other_links)
 
         prev_date = (date_obj - timedelta(days=1)).strftime("%Y-%m-%d")
         next_date = (date_obj + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -1051,16 +978,14 @@ class ScheduleBot:
 
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("⬅️", callback_data=f"sched|{mode}|{prev_date}"),
-             InlineKeyboardButton(
-                 "Сьогодні", callback_data=f"sched|{mode}|today"),
+             InlineKeyboardButton("Сьогодні", callback_data=f"sched|{mode}|today"),
              InlineKeyboardButton("➡️", callback_data=f"sched|{mode}|{next_date}")],
             [InlineKeyboardButton("◀️ Меню", callback_data="back")]
         ])
 
         if update.callback_query:
             if update.callback_query.message.photo:
-                media = InputMediaPhoto(
-                    media=bio, caption=full_caption, parse_mode=ParseMode.HTML)
+                media = InputMediaPhoto(media=bio, caption=full_caption, parse_mode=ParseMode.HTML)
                 try:
                     await update.callback_query.edit_message_media(media=media, reply_markup=kb)
                 except Exception as e:
@@ -1084,24 +1009,22 @@ class ScheduleBot:
 
         if mode == 'week':
             target_date = target_date - timedelta(days=target_date.weekday())
-
-        if mode == 'week':
             fetch_start = target_date
             fetch_end = target_date + timedelta(days=6)
         else:
             fetch_start = target_date
             fetch_end = target_date
 
-        events = self._get_events(
-            s.group_id, s.group_name, start_date=fetch_start, end_date=fetch_end)
+        events = self._get_events(s.group_id, s.group_name, start_date=fetch_start, end_date=fetch_end)
+        
+        # Застосовуємо фільтр вибіркових предметів
+        self._apply_elective_filters(events, update.effective_chat.id)
 
         if mode == 'week':
-            filtered_events = [e for e in events if target_date <=
-                               e.start_time.date() <= target_date + timedelta(days=6)]
+            filtered_events = [e for e in events if target_date <= e.start_time.date() <= target_date + timedelta(days=6)]
             caption = f"📅 Розклад: {s.group_name}"
         else:
-            filtered_events = [
-                e for e in events if e.start_time.date() == target_date]
+            filtered_events = [e for e in events if e.start_time.date() == target_date]
             caption = f"📅 {target_date.strftime('%d.%m')} - {s.group_name}"
 
         await self._send_schedule_image(update, filtered_events, target_date, mode, caption)
@@ -1124,6 +1047,47 @@ class ScheduleBot:
             await self._generic_schedule_command(update, 'date', target_date)
         except:
             await update.message.reply_text("❌ Невірний формат.")
+            
+    async def electives_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        s = self.user_manager.get_user_settings(update.effective_chat.id)
+        if not s.group_id:
+            msg = "⚠️ Спочатку оберіть групу: /group"
+            if update.callback_query:
+                return await update.callback_query.message.reply_text(msg)
+            return await update.message.reply_text(msg)
+
+        now = datetime.now(TIMEZONE).date()
+        events = self._get_events(s.group_id, s.group_name, start_date=now, end_date=now + timedelta(days=180))
+        
+        electives = set()
+        for e in events:
+            if e.is_elective:
+                electives.add(e.subject)
+
+        if not electives:
+            msg = "📚 У вашій групі не знайдено предметів з *(в) на найближчий семестр."
+            if update.callback_query:
+                return await update.callback_query.message.reply_text(msg)
+            return await update.message.reply_text(msg)
+
+        keyboard = []
+        for el in sorted(electives):
+            el_hash = hashlib.md5(el.encode()).hexdigest()[:10]
+            is_disabled = el in s.disabled_electives
+            status = "❌" if is_disabled else "✅"
+            keyboard.append([InlineKeyboardButton(f"{status} {el}", callback_data=f"toggle_el|{el_hash}")])
+            
+        keyboard.append([InlineKeyboardButton("◀️ Головне меню", callback_data="back")])
+        text = "⚙️ <b>Керування вибірковими:</b>\n<i>Натисніть на предмет, щоб увімкнути (✅) або вимкнути (❌) його відображення:</i>"
+        
+        if update.callback_query:
+            try:
+                await update.callback_query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+            except Exception:
+                await update.callback_query.message.delete()
+                await update.effective_chat.send_message(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML, disable_notification=True)
+        else:
+            await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
 
     async def search_all_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not context.args:
@@ -1132,7 +1096,7 @@ class ScheduleBot:
         result = NungParser.search_global(" ".join(context.args))
 
         if result.get("status") == "error":
-            error_msg = f"❌ <b>Помилка пошуку</b>\n\n⚠️ Суть: <code>{result['message']}</code>\n\n<i>Спробуйте пізніше або перевірте сайт деканату.</i>"
+            error_msg = f"❌ <b>Помилка пошуку</b>\n\n⚠️ Суть: <code>{result['message']}</code>\n\n<i>Спробуйте пізніше.</i>"
             return await update.message.reply_text(error_msg, parse_mode=ParseMode.HTML)
 
         results = result.get("data", [])
@@ -1144,11 +1108,9 @@ class ScheduleBot:
             callback_data = f"view_sched_img|{res['type_code']}|{res['id']}|today"
             type_icon = "👨‍🏫" if res['type_code'] == 't' else "🚪"
             btn_text = f"{type_icon} {res['name']}"
-            keyboard.append([InlineKeyboardButton(
-                btn_text, callback_data=callback_data)])
+            keyboard.append([InlineKeyboardButton(btn_text, callback_data=callback_data)])
 
-        keyboard.append([InlineKeyboardButton(
-            "❌ Скасувати", callback_data="delete_msg")])
+        keyboard.append([InlineKeyboardButton("❌ Скасувати", callback_data="delete_msg")])
         await update.message.reply_text(f"🔍 Знайдено {len(results)}:", reply_markup=InlineKeyboardMarkup(keyboard), disable_notification=True)
 
     async def search_local_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1160,15 +1122,13 @@ class ScheduleBot:
 
         query = " ".join(context.args)
         events = self._get_events(s.group_id, s.group_name)
-        found = [e for e in events if e.matches_query(
-            query) and e.start_time.date() >= datetime.now(TIMEZONE).date()]
+        found = [e for e in events if e.matches_query(query) and e.start_time.date() >= datetime.now(TIMEZONE).date()]
         if not found:
             return await update.message.reply_text("📭 Нічого не знайдено.")
 
         text = f"🔍 Результати для '{query}':\n\n"
         for e in found[:10]:
-            text += self.formatter._build_event_details(
-                e) + f"\n📆 {e.start_time.strftime('%d.%m')} {e.start_time.strftime('%H:%M')}\n\n"
+            text += self.formatter._build_event_details(e) + f"\n📆 {e.start_time.strftime('%d.%m')} {e.start_time.strftime('%H:%M')}\n\n"
         for part in self.formatter.split_long_message(text):
             await update.message.reply_text(part, parse_mode=ParseMode.HTML, disable_web_page_preview=True, disable_notification=True)
 
@@ -1179,15 +1139,11 @@ class ScheduleBot:
 
         kb_rows = []
         if is_admin:
-            kb_rows.append([InlineKeyboardButton(
-                f"Сповіщення про зміни {'✅' if s.change_notifications else '❌'}", callback_data="toggle_changes")])
-            kb_rows.append([InlineKeyboardButton(
-                f"Щоденно о {DAILY_NOTIFICATION_TIME} {'✅' if s.daily_notifications else '❌'}", callback_data="toggle_daily")])
-            kb_rows.append([InlineKeyboardButton(
-                f"Розклад на тиждень о {WEEKLY_NOTIFICATION_TIME} {'✅' if s.weekly_notifications else '❌'}", callback_data="toggle_weekly")])
+            kb_rows.append([InlineKeyboardButton(f"Сповіщення про зміни {'✅' if s.change_notifications else '❌'}", callback_data="toggle_changes")])
+            kb_rows.append([InlineKeyboardButton(f"Щоденно о {DAILY_NOTIFICATION_TIME} {'✅' if s.daily_notifications else '❌'}", callback_data="toggle_daily")])
+            kb_rows.append([InlineKeyboardButton(f"Розклад на тиждень о {WEEKLY_NOTIFICATION_TIME} {'✅' if s.weekly_notifications else '❌'}", callback_data="toggle_weekly")])
 
-        kb_rows.append([InlineKeyboardButton(
-            "◀️ Назад", callback_data="back")])
+        kb_rows.append([InlineKeyboardButton("◀️ Назад", callback_data="back")])
         text = f"⚙️ Група: <b>{s.group_name}</b>"
         if not is_admin and update.effective_chat.type != ChatType.PRIVATE:
             text += "\n🔒 <i>Налаштування доступні лише адміністраторам.</i>"
@@ -1203,10 +1159,9 @@ class ScheduleBot:
 
     def get_main_keyboard(self):
         return InlineKeyboardMarkup([
-            [InlineKeyboardButton("📅 Сьогодні", callback_data="today"), InlineKeyboardButton(
-                "📅 Завтра", callback_data="tomorrow")],
-            [InlineKeyboardButton("📊 Тиждень", callback_data="week"), InlineKeyboardButton(
-                "⚙️ Меню", callback_data="notifications")]
+            [InlineKeyboardButton("📅 Сьогодні", callback_data="today"), InlineKeyboardButton("📅 Завтра", callback_data="tomorrow")],
+            [InlineKeyboardButton("📊 Тиждень", callback_data="week"), InlineKeyboardButton("📚 Вибіркові", callback_data="electives")],
+            [InlineKeyboardButton("⚙️ Меню", callback_data="notifications")]
         ])
 
     async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1230,12 +1185,34 @@ class ScheduleBot:
             await self._generic_schedule_command(update, data)
         elif data == "notifications":
             await self.notifications_command(update, context)
+        elif data == "electives":
+            await self.electives_command(update, context)
+
+        elif data.startswith("toggle_el|"):
+            if not await self._is_user_admin(update):
+                return await query.answer("⛔ Тільки адміністратори можуть змінювати налаштування!", show_alert=True)
+                
+            el_hash = data.split("|")[1]
+            s = self.user_manager.get_user_settings(update.effective_chat.id)
+            
+            now = datetime.now(TIMEZONE).date()
+            events = self._get_events(s.group_id, s.group_name, start_date=now, end_date=now + timedelta(days=180))
+            target_subject = next((e.subject for e in events if e.is_elective and hashlib.md5(e.subject.encode()).hexdigest()[:10] == el_hash), None)
+            
+            if target_subject:
+                if target_subject in s.disabled_electives:
+                    s.disabled_electives.remove(target_subject)
+                else:
+                    s.disabled_electives.append(target_subject)
+                
+                self.user_manager.update_user_setting(update.effective_chat.id, 'disabled_electives', s.disabled_electives)
+                await self.electives_command(update, context)
+            await query.answer()
 
         elif data.startswith("toggle_"):
             if not await self._is_user_admin(update):
                 await query.answer("⛔ Тільки адміністратори можуть змінювати налаштування!", show_alert=True)
                 return
-
             if data == "toggle_changes":
                 setting = "change_notifications"
             elif data == "toggle_daily":
@@ -1245,10 +1222,8 @@ class ScheduleBot:
             else:
                 return
 
-            curr = getattr(self.user_manager.get_user_settings(
-                update.effective_chat.id), setting)
-            self.user_manager.update_user_setting(
-                update.effective_chat.id, setting, not curr)
+            curr = getattr(self.user_manager.get_user_settings(update.effective_chat.id), setting)
+            self.user_manager.update_user_setting(update.effective_chat.id, setting, not curr)
             await self.notifications_command(update, context)
             await query.answer()
 
@@ -1256,36 +1231,28 @@ class ScheduleBot:
             await query.answer()
             parts = data.split("|")
             mode, date_str = parts[1], parts[2]
-            target_date = datetime.now(TIMEZONE).date(
-            ) if date_str == "today" else datetime.strptime(date_str, "%Y-%m-%d").date()
+            target_date = datetime.now(TIMEZONE).date() if date_str == "today" else datetime.strptime(date_str, "%Y-%m-%d").date()
             await self._generic_schedule_command(update, mode, target_date)
 
         elif data.startswith("view_sched_img|"):
             await query.answer()
             parts = data.split("|")
             type_code, obj_id, date_str = parts[1], parts[2], parts[3]
-            target_date = datetime.now(TIMEZONE).date(
-            ) if date_str == "today" else datetime.strptime(date_str, "%Y-%m-%d").date()
+            target_date = datetime.now(TIMEZONE).date() if date_str == "today" else datetime.strptime(date_str, "%Y-%m-%d").date()
             obj_mode = 'teacher' if type_code == 't' else 'room'
 
-            events = NungParser.get_schedule(
-                obj_id, start_date=target_date, end_date=target_date, obj_type=obj_mode)
+            events = NungParser.get_schedule(obj_id, start_date=target_date, end_date=target_date, obj_type=obj_mode)
 
             if self.image_generator:
-                bio = self.image_generator.create_day_image(
-                    events, target_date)
-                prev_date = (target_date - timedelta(days=1)
-                             ).strftime("%Y-%m-%d")
-                next_date = (target_date + timedelta(days=1)
-                             ).strftime("%Y-%m-%d")
+                bio = self.image_generator.create_day_image(events, target_date)
+                prev_date = (target_date - timedelta(days=1)).strftime("%Y-%m-%d")
+                next_date = (target_date + timedelta(days=1)).strftime("%Y-%m-%d")
 
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton("⬅️", callback_data=f"view_sched_img|{type_code}|{obj_id}|{prev_date}"),
-                     InlineKeyboardButton(
-                         "Сьогодні", callback_data=f"view_sched_img|{type_code}|{obj_id}|today"),
+                     InlineKeyboardButton("Сьогодні", callback_data=f"view_sched_img|{type_code}|{obj_id}|today"),
                      InlineKeyboardButton("➡️", callback_data=f"view_sched_img|{type_code}|{obj_id}|{next_date}")],
-                    [InlineKeyboardButton(
-                        "❌ Закрити", callback_data="delete_msg")]
+                    [InlineKeyboardButton("❌ Закрити", callback_data="delete_msg")]
                 ])
 
                 if query.message.photo:
@@ -1305,21 +1272,19 @@ def main():
 
     application.add_handler(CommandHandler("start", bot.start_command))
     application.add_handler(CommandHandler("group", bot.group_command))
-    application.add_handler(CommandHandler(
-        "settings", bot.notifications_command))
-    application.add_handler(CommandHandler(
-        "search_all", bot.search_all_command))
+    application.add_handler(CommandHandler("settings", bot.notifications_command))
+    application.add_handler(CommandHandler("search_all", bot.search_all_command))
     application.add_handler(CommandHandler("search", bot.search_local_command))
     application.add_handler(CommandHandler("date", bot.date_command))
     application.add_handler(CommandHandler("today", bot.today_command))
     application.add_handler(CommandHandler("tomorrow", bot.tomorrow_command))
     application.add_handler(CommandHandler("week", bot.week_command))
+    application.add_handler(CommandHandler("electives", bot.electives_command))
 
     application.add_handler(CallbackQueryHandler(bot.button_callback))
 
     logger.info("Bot started...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
-
 
 if __name__ == '__main__':
     main()
