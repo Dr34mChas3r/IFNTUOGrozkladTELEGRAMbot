@@ -5,3 +5,4 @@ Pillow
 pytz
 beautifulsoup4
 qrcode[pil]
+psycopg
