@@ -4,6 +4,8 @@ import re
 import json
 import hashlib
 import asyncio
+import traceback
+import html
 from datetime import datetime, timedelta, date, time
 from typing import List, Dict, Optional
 from enum import Enum
@@ -83,13 +85,11 @@ class ScheduleEvent:
         self.end_time = data.get('end_time', datetime.now(TIMEZONE))
         self.is_cancelled = data.get('is_cancelled', False)
         
-        # ВИЗНАЧЕННЯ ВИБІРКОВИХ: Шукаємо *(в) або військову підготовку
         self.is_elective = "*(в)" in self.raw_subject.lower() or "військова підготовка" in self.raw_subject.lower()
         self.is_unselected = False 
 
         self.subject = self._clean_subject(self.raw_subject)
         
-        # ЗАПОБІЖНИК: якщо після фільтрації назва пропала, повертаємо оригінал
         if not self.subject.strip():
             self.subject = self.raw_subject
 
@@ -149,12 +149,13 @@ class ScheduleEvent:
                 q in self.room.lower() or
                 q in self.event_type.lower() or
                 q in self.group.lower())
+
 class ScheduleChange:
     def __init__(self, change_type: ChangeType, event: ScheduleEvent, old_event: Optional[ScheduleEvent] = None):
         self.change_type = change_type
         self.event = event
         self.old_event = old_event
-        
+
 class UserSettings:
     def __init__(self, chat_id: int):
         self.chat_id = chat_id
@@ -165,6 +166,7 @@ class UserSettings:
         self.weekly_notifications = False
         self.pinned_messages: List[int] = []
         self.disabled_electives: List[str] = []
+        self.debug_mode = False
 
     def to_dict(self) -> dict:
         return {
@@ -175,7 +177,8 @@ class UserSettings:
             'daily_notifications': self.daily_notifications,
             'weekly_notifications': self.weekly_notifications,
             'pinned_messages': self.pinned_messages,
-            'disabled_electives': self.disabled_electives
+            'disabled_electives': self.disabled_electives,
+            'debug_mode': getattr(self, 'debug_mode', False)
         }
 
     @classmethod
@@ -188,6 +191,7 @@ class UserSettings:
         settings.weekly_notifications = data.get('weekly_notifications', False)
         settings.pinned_messages = data.get('pinned_messages', [])
         settings.disabled_electives = data.get('disabled_electives', [])
+        settings.debug_mode = data.get('debug_mode', False)
         return settings
 
 from storage_postgres import UserManager, build_schedule_cache_class
@@ -208,19 +212,14 @@ class NungParser:
                                     'x': 'х', 'a': 'а', 'e': 'е', 'h': 'н', 't': 'т', 'm': 'м', 'b': 'в'})
         return text.translate(trans_table)
 
-
     @staticmethod
-    def get_group_id(group_name: str) -> Optional[str]:
+    def get_group_id(group_name: str) -> tuple[Optional[str], str]:
         params = {'req_type': 'obj_list', 'req_mode': 'group', 'show_ID': 'yes',
                   'req_format': 'json', 'coding_mode': 'WINDOWS-1251', 'bs': 'ok'}
-        
-        # ДОДАЄМО МАСКУВАННЯ ПІД БРАУЗЕР
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
-        
         try:
-            # Передаємо headers у запит
             response = requests.get(NungParser.API_URL, params=params, headers=headers, timeout=10, verify=False)
             try:
                 data = response.json()
@@ -228,11 +227,11 @@ class NungParser:
                 response = requests.get(NungParser.API_URL, params={
                                         **params, 'coding_mode': 'UTF-8'}, headers=headers, timeout=10, verify=False)
                 data = response.json()
-                
-            # Перевіряємо, чи деканат не віддав помилку у форматі JSON (наприклад, code: -8)
+
             if isinstance(data, dict) and 'code' in data and int(data['code']) < 0:
-                logger.warning(f"Деканат віддав помилку: {data.get('error_message')}")
-                return None
+                err_msg = data.get('error_message', 'Сервер тимчасово не працює')
+                logger.warning(f"Деканат віддав помилку: {err_msg}")
+                return None, f"Відповідь деканату: {err_msg}"
 
             target = NungParser._normalize(group_name)
             root = data.get('psrozklad_export') or data.get('ps_rozklad_export')
@@ -240,12 +239,11 @@ class NungParser:
                 for dept in root.get('departments', []):
                     for obj in dept.get('objects', []):
                         if NungParser._normalize(obj.get('name', '')) == target:
-                            return obj.get('ID')
-            return None
+                            return obj.get('ID'), "OK"
+            return None, "Таку групу не знайдено у списку деканату. Перевірте правильність написання."
         except Exception as e:
             logger.error(f"Group Search Error: {e}")
-            return None
-
+            return None, "Сервер деканату не відповідає (Timeout або помилка з'єднання)."
 
     @staticmethod
     def search_global(query: str) -> Dict:
@@ -281,8 +279,11 @@ class NungParser:
         for encoding in ['WINDOWS-1251', 'UTF-8']:
             params = {'req_type': 'obj_list', 'req_mode': req_mode, 'show_ID': 'yes',
                       'req_format': 'json', 'coding_mode': encoding, 'bs': 'ok'}
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
             try:
-                response = requests.get(NungParser.API_URL, params=params, timeout=25, verify=False)
+                response = requests.get(NungParser.API_URL, params=params, headers=headers, timeout=15, verify=False)
                 data = response.json()
                 root = data.get('psrozklad_export') or data.get('ps_rozklad_export')
                 if not root:
@@ -309,7 +310,7 @@ class NungParser:
             return links_data
 
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Content-Type': 'application/x-www-form-urlencoded',
             'Referer': 'https://dekanat.nung.edu.ua/cgi-bin/timetable.cgi?n=700'
         }
@@ -322,7 +323,7 @@ class NungParser:
                 'edate': end_date.strftime('%d.%m.%Y')
             }
 
-            response = requests.post(NungParser.HTML_URL, data=payload, headers=headers, timeout=8, verify=False)
+            response = requests.post(NungParser.HTML_URL, data=payload, headers=headers, timeout=3, verify=False)
             response.encoding = 'windows-1251'
             soup = BeautifulSoup(response.text, 'html.parser')
 
@@ -424,7 +425,7 @@ class NungParser:
                 results.append(chunk)
             prev_split = split_point
         return results
-
+        
     @staticmethod
     def get_schedule_json(obj_id: str, obj_mode: str, start_date: date, end_date: date, links_data: List[Dict] = None) -> List[ScheduleEvent]:
         params = {
@@ -432,26 +433,39 @@ class NungParser:
             'ros_text': 'separated', 'begin_date': start_date.strftime('%d.%m.%Y'),
             'end_date': end_date.strftime('%d.%m.%Y'), 'req_format': 'json', 'coding_mode': 'UTF8', 'bs': 'ok'
         }
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
         try:
-            response = requests.get(NungParser.API_URL, params=params, timeout=15, verify=False)
+            response = requests.get(NungParser.API_URL, params=params, headers=headers, timeout=4, verify=False)
             response.encoding = 'utf-8'
             data = response.json()
             
-            # ОБРОБКА ПОМИЛОК ДЕКАНАТУ
-            if 'code' in data:
+            if isinstance(data, dict) and 'code' in data:
                 err_code = int(data['code'])
                 if err_code < 0:
                     err_msg = data.get('error_message', 'Невідома помилка сервера')
                     logger.warning(f"API Деканату повернуло помилку {err_code}: {err_msg}")
-                    return [] # Повертаємо пустий список, щоб бот підняв локальний кеш
+                    raise Exception(f"Код {err_code}: {err_msg}")
 
             events = []
             root = data.get('psrozklad_export') or data.get('ps_rozklad_export')
             items = root.get('roz_items', []) if root else []
 
             for item in items:
-                original_desc = item.get('lesson_description', '').strip() or \
-                    f"{item.get('title', '')} {item.get('teacher', '')} {item.get('room', '')}"
+                # Бронебійний захист від null (None) у JSON
+                desc_raw = item.get('lesson_description')
+                original_desc = str(desc_raw).strip() if desc_raw else ""
+
+                if not original_desc:
+                    title = item.get('title') or ""
+                    teacher = item.get('teacher') or ""
+                    room = item.get('room') or ""
+                    reservation = item.get('reservation') or ""
+                    
+                    parts = [str(title), str(teacher), str(room), str(reservation)]
+                    original_desc = " ".join(p.strip() for p in parts if p.strip())
 
                 descriptions = NungParser._split_merged_events(original_desc)
                 json_link = item.get('link') or item.get('url') or ""
@@ -459,7 +473,9 @@ class NungParser:
 
                 for description in descriptions:
                     date_str = item.get('date')
-                    time_range = item.get('lesson_time', '').split('-')
+                    time_raw = item.get('lesson_time') or ""
+                    time_range = time_raw.split('-')
+                    
                     if len(time_range) != 2:
                         continue
                     try:
@@ -468,7 +484,7 @@ class NungParser:
                         end_time = datetime.strptime(time_range[1].strip(), '%H:%M').time()
                         start_dt = TIMEZONE.localize(datetime.combine(date_obj, start_time))
                         end_dt = TIMEZONE.localize(datetime.combine(date_obj, end_time))
-                    except ValueError:
+                    except (ValueError, TypeError):
                         continue
 
                     room = item.get('room') or ""
@@ -559,7 +575,6 @@ class NungParser:
                     if not final_links and json_link and not has_multiple_subgroups:
                         final_links.append(json_link)
 
-                    # Зберігаємо оригінал для вибіркових, щоб не втратити назву
                     is_elective_raw = "*(в)" in original_desc.lower() or "військова підготовка" in original_desc.lower()
                     subject_to_save = original_desc if is_elective_raw else (clean_text or original_desc)
 
@@ -674,10 +689,21 @@ class ScheduleBot:
         except:
             return False
 
-    def _get_events(self, group_id: str, group_name: str = None, start_date: date = None, end_date: date = None) -> List[ScheduleEvent]:
-        events = NungParser.get_schedule(group_id, start_date=start_date, end_date=end_date, obj_type='group', group_name=group_name)
+    async def _get_events(self, group_id: str, context: ContextTypes.DEFAULT_TYPE = None, chat_id: int = None, group_name: str = None, start_date: date = None, end_date: date = None) -> List[ScheduleEvent]:
+        debug_info = ""
+        try:
+            events = await asyncio.to_thread(
+                NungParser.get_schedule, 
+                group_id, start_date=start_date, end_date=end_date, obj_type='group', group_name=group_name
+            )
+        except Exception as e:
+            logger.error(f"Помилка отримання/парсингу: {e}")
+            debug_info = f"❌ Деканат недоступний або повернув помилку:\n<code>{e}</code>"
+            events = []
         
-        # FALLBACK: Якщо сервер лежить, дістаємо з бази
+        if not events and not debug_info:
+            debug_info = "❌ Деканат не повернув розклад (пуста відповідь)."
+
         if not events:
             logger.warning(f"Сервер не віддав розклад для {group_id}. Використовуємо локальний кеш.")
             cached_events = self.cache_manager._group_caches.get(group_id, [])
@@ -685,13 +711,34 @@ class ScheduleBot:
                 events = [e for e in cached_events if start_date <= e.start_time.date() <= end_date]
             else:
                 events = cached_events
-                
+            
+            if events:
+                debug_info += "\n✅ Розклад успішно піднято з локального кешу (Fallback)."
+            else:
+                debug_info += "\n⚠️ На жаль, у локальному кеші також немає даних на цей період."
+
+        if context and chat_id and debug_info and ("❌" in debug_info or "⚠️" in debug_info):
+            s = self.user_manager.get_user_settings(chat_id)
+            if getattr(s, 'debug_mode', False):
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat_id, 
+                        text=f"🛠 <b>Системне повідомлення (Дебаг):</b>\n{debug_info}", 
+                        parse_mode=ParseMode.HTML,
+                        disable_notification=True
+                    )
+                except Exception as e:
+                    logger.error(f"Не вдалося відправити дебаг у чат {chat_id}: {e}")
+
         return events
 
     def _apply_elective_filters(self, events: List[ScheduleEvent], chat_id: int):
         s = self.user_manager.get_user_settings(chat_id)
+        # БЕЗПЕЧНИЙ ВИКЛИК: якщо поля немає, беремо пустий список
+        disabled_list = getattr(s, 'disabled_electives', [])
+        
         for e in events:
-            if e.is_elective and e.subject in s.disabled_electives:
+            if e.is_elective and e.subject in disabled_list:
                 e.is_unselected = True
 
     async def _pin_message_with_management(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int):
@@ -717,7 +764,7 @@ class ScheduleBot:
             if not s.group_id:
                 continue
             
-            events = self._get_events(s.group_id, s.group_name, start_date=tomorrow, end_date=tomorrow + timedelta(days=6))
+            events = await self._get_events(s.group_id, context=context, chat_id=chat_id, group_name=s.group_name, start_date=tomorrow, end_date=tomorrow + timedelta(days=6))
             if not events:
                 continue
                 
@@ -739,7 +786,7 @@ class ScheduleBot:
             if not s.group_id:
                 continue
 
-            events = self._get_events(s.group_id, s.group_name, start_date=today, end_date=today)
+            events = await self._get_events(s.group_id, context=context, chat_id=chat_id, group_name=s.group_name, start_date=today, end_date=today)
             if not events:
                 continue
 
@@ -792,7 +839,6 @@ class ScheduleBot:
                             subject_display = f"{subject} {group}"
 
                         link_name = "Meet 🎥" if "meet" in link else ("Zoom 🎥" if "zoom" in link else "🔗")
-
                         if idx == 0:
                             links_text_lines.append(f"{pair_emoji} {subject_display}: <a href=\"{link}\">{link_name}</a>")
                         else:
@@ -836,7 +882,7 @@ class ScheduleBot:
                     active_groups[s.group_id] = s.group_name
 
             for group_id, group_name in active_groups.items():
-                new_events = NungParser.get_schedule(group_id, obj_type='group', group_name=group_name)
+                new_events = await self._get_events(group_id, group_name=group_name)
 
                 if not new_events:
                     old_events = self.cache_manager._group_caches.get(group_id, [])
@@ -874,25 +920,36 @@ class ScheduleBot:
             return await update.message.reply_text("⛔ Тільки адміністратори чату можуть змінювати групу.")
         if not context.args:
             return await update.message.reply_text("❌ Приклад: `/group КІ-24-1`", parse_mode=ParseMode.MARKDOWN)
+            
         group_name = " ".join(context.args)
-        group_id = NungParser.get_group_id(group_name)
+        group_id, error_message = NungParser.get_group_id(group_name)
+        
         if group_id:
             self.user_manager.update_user_group(update.effective_chat.id, group_name.upper(), group_id)
-            events = NungParser.get_schedule(group_id, obj_type='group', group_name=group_name.upper())
+            events = await self._get_events(group_id, context=context, chat_id=update.effective_chat.id, group_name=group_name.upper())
             self.cache_manager.update_and_detect_changes(group_id, events)
             await update.message.reply_text(f"✅ Збережено: <b>{group_name.upper()}</b>", parse_mode=ParseMode.HTML, reply_markup=self.get_main_keyboard())
         else:
-            await update.message.reply_text("❌ Групу не знайдено.")
+            await update.message.reply_text(f"❌ <b>Помилка:</b> {error_message}", parse_mode=ParseMode.HTML)
 
     async def _send_schedule_image(self, update: Update, events: List[ScheduleEvent], date_obj: date, mode: str, caption: str):
         if not self.image_generator:
             text_response = caption + "\n\n"
             for e in events:
                 text_response += self.formatter._build_event_details(e) + "\n\n"
+            
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀️ Меню", callback_data="back")]
+            ])
+            
             if update.callback_query:
-                await update.callback_query.message.edit_text(text_response, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+                try:
+                    await update.callback_query.message.edit_text(text_response, parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=kb)
+                except Exception as e:
+                    if "Message is not modified" not in str(e):
+                        await update.effective_chat.send_message(text_response, parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=kb)
             else:
-                await update.effective_chat.send_message(text_response, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+                await update.effective_chat.send_message(text_response, parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=kb)
             return
 
         if mode == 'week':
@@ -995,8 +1052,8 @@ class ScheduleBot:
                 await update.effective_chat.send_photo(photo=bio, caption=full_caption, reply_markup=kb, parse_mode=ParseMode.HTML, disable_notification=True)
         else:
             await update.effective_chat.send_photo(photo=bio, caption=full_caption, reply_markup=kb, parse_mode=ParseMode.HTML, disable_notification=True)
-
-    async def _generic_schedule_command(self, update: Update, mode='today', target_date=None):
+            
+    async def _generic_schedule_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE, mode='today', target_date=None):
         s = self.user_manager.get_user_settings(update.effective_chat.id)
         if not s.group_id:
             return await update.effective_message.reply_text("⚠️ Оберіть групу: `/group Назва`")
@@ -1015,9 +1072,8 @@ class ScheduleBot:
             fetch_start = target_date
             fetch_end = target_date
 
-        events = self._get_events(s.group_id, s.group_name, start_date=fetch_start, end_date=fetch_end)
+        events = await self._get_events(s.group_id, context=context, chat_id=update.effective_chat.id, group_name=s.group_name, start_date=fetch_start, end_date=fetch_end)
         
-        # Застосовуємо фільтр вибіркових предметів
         self._apply_elective_filters(events, update.effective_chat.id)
 
         if mode == 'week':
@@ -1030,13 +1086,13 @@ class ScheduleBot:
         await self._send_schedule_image(update, filtered_events, target_date, mode, caption)
 
     async def today_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await self._generic_schedule_command(update, 'today')
+        await self._generic_schedule_command(update, context, 'today')
 
     async def tomorrow_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await self._generic_schedule_command(update, 'tomorrow')
+        await self._generic_schedule_command(update, context, 'tomorrow')
 
     async def week_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await self._generic_schedule_command(update, 'week')
+        await self._generic_schedule_command(update, context, 'week')
 
     async def date_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not context.args:
@@ -1044,7 +1100,7 @@ class ScheduleBot:
         try:
             day, month = map(int, context.args[0].split('.'))
             target_date = date(datetime.now().year, month, day)
-            await self._generic_schedule_command(update, 'date', target_date)
+            await self._generic_schedule_command(update, context, 'date', target_date)
         except:
             await update.message.reply_text("❌ Невірний формат.")
             
@@ -1057,7 +1113,7 @@ class ScheduleBot:
             return await update.message.reply_text(msg)
 
         now = datetime.now(TIMEZONE).date()
-        events = self._get_events(s.group_id, s.group_name, start_date=now, end_date=now + timedelta(days=180))
+        events = await self._get_events(s.group_id, context=context, chat_id=update.effective_chat.id, group_name=s.group_name, start_date=now, end_date=now + timedelta(days=180))
         
         electives = set()
         for e in events:
@@ -1071,15 +1127,17 @@ class ScheduleBot:
             return await update.message.reply_text(msg)
 
         keyboard = []
+        # БЕЗПЕЧНИЙ ВИКЛИК
+        disabled_list = getattr(s, 'disabled_electives', [])
+        
         for el in sorted(electives):
             el_hash = hashlib.md5(el.encode()).hexdigest()[:10]
-            is_disabled = el in s.disabled_electives
+            is_disabled = el in disabled_list
             status = "❌" if is_disabled else "✅"
             keyboard.append([InlineKeyboardButton(f"{status} {el}", callback_data=f"toggle_el|{el_hash}")])
             
         keyboard.append([InlineKeyboardButton("◀️ Головне меню", callback_data="back")])
         text = "⚙️ <b>Керування вибірковими:</b>\n<i>Натисніть на предмет, щоб увімкнути (✅) або вимкнути (❌) його відображення:</i>"
-        
         if update.callback_query:
             try:
                 await update.callback_query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
@@ -1093,7 +1151,7 @@ class ScheduleBot:
         if not context.args:
             return await update.message.reply_text("🔍 Приклад: `/search_all Коваль`")
 
-        result = NungParser.search_global(" ".join(context.args))
+        result = await asyncio.to_thread(NungParser.search_global, " ".join(context.args))
 
         if result.get("status") == "error":
             error_msg = f"❌ <b>Помилка пошуку</b>\n\n⚠️ Суть: <code>{result['message']}</code>\n\n<i>Спробуйте пізніше.</i>"
@@ -1121,7 +1179,7 @@ class ScheduleBot:
             return await update.message.reply_text("🔍 Приклад: `/search Математика`", parse_mode=ParseMode.MARKDOWN)
 
         query = " ".join(context.args)
-        events = self._get_events(s.group_id, s.group_name)
+        events = await self._get_events(s.group_id, context=context, chat_id=update.effective_chat.id, group_name=s.group_name)
         found = [e for e in events if e.matches_query(query) and e.start_time.date() >= datetime.now(TIMEZONE).date()]
         if not found:
             return await update.message.reply_text("📭 Нічого не знайдено.")
@@ -1142,6 +1200,7 @@ class ScheduleBot:
             kb_rows.append([InlineKeyboardButton(f"Сповіщення про зміни {'✅' if s.change_notifications else '❌'}", callback_data="toggle_changes")])
             kb_rows.append([InlineKeyboardButton(f"Щоденно о {DAILY_NOTIFICATION_TIME} {'✅' if s.daily_notifications else '❌'}", callback_data="toggle_daily")])
             kb_rows.append([InlineKeyboardButton(f"Розклад на тиждень о {WEEKLY_NOTIFICATION_TIME} {'✅' if s.weekly_notifications else '❌'}", callback_data="toggle_weekly")])
+            kb_rows.append([InlineKeyboardButton(f"Режим дебагу 🛠️ {'✅' if getattr(s, 'debug_mode', False) else '❌'}", callback_data="toggle_debug")])
 
         kb_rows.append([InlineKeyboardButton("◀️ Назад", callback_data="back")])
         text = f"⚙️ Група: <b>{s.group_name}</b>"
@@ -1168,6 +1227,12 @@ class ScheduleBot:
         query = update.callback_query
         data = query.data
 
+        # ЗУПИНЯЄМО КРУТИЛКУ ОДРАЗУ! (Щоб кнопка не висіла 15 секунд, навіть якщо далі буде помилка)
+        try:
+            await query.answer()
+        except:
+            pass
+
         if data == "delete_msg":
             await query.message.delete()
         elif data == "back":
@@ -1182,7 +1247,7 @@ class ScheduleBot:
                 await query.message.chat.send_message("🏠 Головне меню:", reply_markup=self.get_main_keyboard(), disable_notification=True)
 
         elif data in ['today', 'tomorrow', 'week']:
-            await self._generic_schedule_command(update, data)
+            await self._generic_schedule_command(update, context, data)
         elif data == "notifications":
             await self.notifications_command(update, context)
         elif data == "electives":
@@ -1196,52 +1261,57 @@ class ScheduleBot:
             s = self.user_manager.get_user_settings(update.effective_chat.id)
             
             now = datetime.now(TIMEZONE).date()
-            events = self._get_events(s.group_id, s.group_name, start_date=now, end_date=now + timedelta(days=180))
+            events = await self._get_events(s.group_id, context=context, chat_id=update.effective_chat.id, group_name=s.group_name, start_date=now, end_date=now + timedelta(days=180))
             target_subject = next((e.subject for e in events if e.is_elective and hashlib.md5(e.subject.encode()).hexdigest()[:10] == el_hash), None)
             
             if target_subject:
-                if target_subject in s.disabled_electives:
-                    s.disabled_electives.remove(target_subject)
-                else:
-                    s.disabled_electives.append(target_subject)
+                # БЕЗПЕЧНИЙ ВИКЛИК: дістаємо список вимкнених предметів або створюємо порожній
+                disabled_list = getattr(s, 'disabled_electives', [])
                 
-                self.user_manager.update_user_setting(update.effective_chat.id, 'disabled_electives', s.disabled_electives)
+                if target_subject in disabled_list:
+                    disabled_list.remove(target_subject)
+                else:
+                    disabled_list.append(target_subject)
+                
+                # Зберігаємо в базу
+                self.user_manager.update_user_setting(update.effective_chat.id, 'disabled_electives', disabled_list)
+                # Оновлюємо поточний об'єкт у пам'яті безпечним методом
+                setattr(s, 'disabled_electives', disabled_list)
+                
                 await self.electives_command(update, context)
-            await query.answer()
 
         elif data.startswith("toggle_"):
             if not await self._is_user_admin(update):
-                await query.answer("⛔ Тільки адміністратори можуть змінювати налаштування!", show_alert=True)
-                return
+                return await query.answer("⛔ Тільки адміністратори можуть змінювати налаштування!", show_alert=True)
+            
             if data == "toggle_changes":
                 setting = "change_notifications"
             elif data == "toggle_daily":
                 setting = "daily_notifications"
             elif data == "toggle_weekly":
                 setting = "weekly_notifications"
+            elif data == "toggle_debug":
+                setting = "debug_mode"
             else:
                 return
 
-            curr = getattr(self.user_manager.get_user_settings(update.effective_chat.id), setting)
+            curr = getattr(self.user_manager.get_user_settings(update.effective_chat.id), setting, False)
             self.user_manager.update_user_setting(update.effective_chat.id, setting, not curr)
             await self.notifications_command(update, context)
-            await query.answer()
 
         elif data.startswith("sched|"):
-            await query.answer()
             parts = data.split("|")
             mode, date_str = parts[1], parts[2]
             target_date = datetime.now(TIMEZONE).date() if date_str == "today" else datetime.strptime(date_str, "%Y-%m-%d").date()
-            await self._generic_schedule_command(update, mode, target_date)
+            await self._generic_schedule_command(update, context, mode, target_date)
 
         elif data.startswith("view_sched_img|"):
-            await query.answer()
             parts = data.split("|")
             type_code, obj_id, date_str = parts[1], parts[2], parts[3]
             target_date = datetime.now(TIMEZONE).date() if date_str == "today" else datetime.strptime(date_str, "%Y-%m-%d").date()
             obj_mode = 'teacher' if type_code == 't' else 'room'
 
-            events = NungParser.get_schedule(obj_id, start_date=target_date, end_date=target_date, obj_type=obj_mode)
+            events = await asyncio.to_thread(NungParser.get_schedule, obj_id, start_date=target_date, end_date=target_date, obj_type=obj_mode)
 
             if self.image_generator:
                 bio = self.image_generator.create_day_image(events, target_date)
@@ -1260,7 +1330,26 @@ class ScheduleBot:
                 else:
                     await query.message.delete()
                     await query.message.chat.send_photo(photo=bio, caption=f"Розклад: {obj_id}", reply_markup=kb, disable_notification=True)
-
+                    
+async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.error("Exception while handling an update:", exc_info=context.error)
+    
+    # Збираємо текст помилки
+    tb_list = traceback.format_exception(None, context.error, context.error.__traceback__)
+    tb_string = "".join(tb_list)
+    
+    # Беремо останній шматок помилки, щоб влізло в ліміт Telegram
+    error_msg = f"🚨 <b>КРАШ БОТА!</b> 🚨\n\n<pre><code class='language-python'>{html.escape(tb_string[-3000:])}</code></pre>"
+    
+    if isinstance(update, Update) and update.effective_chat:
+        try:
+            # Знімаємо анімацію загрузки з кнопки
+            if update.callback_query:
+                await update.callback_query.answer()
+            # Відправляємо помилку в чат
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=error_msg, parse_mode=ParseMode.HTML)
+        except Exception as e:
+            logger.error(f"Не зміг відправити помилку: {e}")
 
 def main():
     if not BOT_TOKEN:
@@ -1282,9 +1371,10 @@ def main():
     application.add_handler(CommandHandler("electives", bot.electives_command))
 
     application.add_handler(CallbackQueryHandler(bot.button_callback))
-
+    application.add_error_handler(global_error_handler)
     logger.info("Bot started...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     main()
+    
