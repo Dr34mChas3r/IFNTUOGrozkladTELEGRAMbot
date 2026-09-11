@@ -64,6 +64,8 @@ class UserSettings:
         self.daily_notifications = False
         self.weekly_notifications = False
         self.pinned_messages: List[int] = []
+        self.disabled_electives: List[str] = []
+        self.debug_mode = False
 
     def to_dict(self) -> dict:
         return {
@@ -73,7 +75,9 @@ class UserSettings:
             'change_notifications': self.change_notifications,
             'daily_notifications': self.daily_notifications,
             'weekly_notifications': self.weekly_notifications,
-            'pinned_messages': self.pinned_messages
+            'pinned_messages': self.pinned_messages,
+            'disabled_electives': self.disabled_electives,
+            'debug_mode': self.debug_mode
         }
 
     @classmethod
@@ -85,6 +89,8 @@ class UserSettings:
         settings.daily_notifications = data.get('daily_notifications', False)
         settings.weekly_notifications = data.get('weekly_notifications', False)
         settings.pinned_messages = data.get('pinned_messages', [])
+        settings.disabled_electives = data.get('disabled_electives', [])
+        settings.debug_mode = data.get('debug_mode', False)
         return settings
 
     @classmethod
@@ -96,6 +102,8 @@ class UserSettings:
         s.daily_notifications = row['daily_notifications']
         s.weekly_notifications = row['weekly_notifications']
         s.pinned_messages = row['pinned_messages'] or []
+        s.disabled_electives = row.get('disabled_electives') or []
+        s.debug_mode = row.get('debug_mode', False)
         return s
 
 
@@ -121,7 +129,9 @@ class UserManager:
                         change_notifications BOOLEAN NOT NULL DEFAULT FALSE,
                         daily_notifications BOOLEAN NOT NULL DEFAULT FALSE,
                         weekly_notifications BOOLEAN NOT NULL DEFAULT FALSE,
-                        pinned_messages JSONB NOT NULL DEFAULT '[]'::jsonb
+                        pinned_messages JSONB NOT NULL DEFAULT '[]'::jsonb,
+                        disabled_electives JSONB NOT NULL DEFAULT '[]'::jsonb,
+                        debug_mode BOOLEAN NOT NULL DEFAULT FALSE
                     )
                 """)
             conn.commit()
@@ -145,20 +155,25 @@ class UserManager:
                     cur.execute("""
                         INSERT INTO users (chat_id, group_name, group_id,
                             change_notifications, daily_notifications,
-                            weekly_notifications, pinned_messages)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            weekly_notifications, pinned_messages,
+                            disabled_electives, debug_mode)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (chat_id) DO UPDATE SET
                             group_name = EXCLUDED.group_name,
                             group_id = EXCLUDED.group_id,
                             change_notifications = EXCLUDED.change_notifications,
                             daily_notifications = EXCLUDED.daily_notifications,
                             weekly_notifications = EXCLUDED.weekly_notifications,
-                            pinned_messages = EXCLUDED.pinned_messages
+                            pinned_messages = EXCLUDED.pinned_messages,
+                            disabled_electives = EXCLUDED.disabled_electives,
+                            debug_mode = EXCLUDED.debug_mode
                     """, (
                         settings.chat_id, settings.group_name, settings.group_id,
                         settings.change_notifications, settings.daily_notifications,
                         settings.weekly_notifications,
-                        psycopg2.extras.Json(settings.pinned_messages)
+                        psycopg2.extras.Json(settings.pinned_messages),
+                        psycopg2.extras.Json(settings.disabled_electives),
+                        settings.debug_mode
                     ))
                 conn.commit()
         except Exception as e:
@@ -273,3 +288,4 @@ def build_schedule_cache_class(ScheduleEvent, ChangeType, ScheduleChange, TIMEZO
             return changes
 
     return ScheduleCache
+    
