@@ -1,8 +1,10 @@
 python-telegram-bot>=20.0
+python-telegram-bot[job-queue]
 requests
 python-dotenv
 Pillow
 pytz
+pilmoji
 beautifulsoup4
 qrcode[pil]
-psycopg
+psycopg2-binary
