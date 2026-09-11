@@ -4,6 +4,16 @@ from io import BytesIO
 from collections import defaultdict
 from PIL import Image, ImageDraw, ImageFont
 import qrcode
+import re
+
+# Безпечний імпорт pilmoji для підтримки емодзі
+try:
+    from pilmoji import Pilmoji
+    HAS_PILMOJI = True
+except ImportError:
+    print("⚠️ УВАГА: Бібліотека pilmoji не знайдена! Емодзі можуть відображатися як квадратики. Встановіть: pip install pilmoji")
+    HAS_PILMOJI = False
+
 
 class ScheduleImageGenerator:
     def __init__(self, font_path="Roboto-Regular.ttf"):
@@ -13,6 +23,11 @@ class ScheduleImageGenerator:
         self.TIME_BG = "#E1E8ED"
         self.CARD_BG = "#FFFFFF"
         self.BORDER_COLOR = "#D0D7DE"
+        
+        # Кольори для вимкнених предметів
+        self.UNSEL_BG = "#F7F9FA"
+        self.UNSEL_TEXT = "#9AA0A6"
+        self.UNSEL_BAR = "#D0D7DE"
         
         self.ACCENT_BLUE = "#0000ff"
         self.ACCENT_ORANGE = "#ffa500"
@@ -51,9 +66,17 @@ class ScheduleImageGenerator:
             self.font_matrix_empty = ImageFont.load_default()
             self.font_matrix_header_day = ImageFont.load_default()
 
-    # --- Утиліта: конвертує datetime/date до локального date (UTC+3) ---
+    # --- Універсальний малювальник тексту (з підтримкою емодзі) ---
+    def _draw_text(self, draw, pilmoji, pos, text, font, fill, align="left"):
+        if pilmoji:
+            pilmoji.text(pos, text, font=font, fill=fill, align=align)
+        else:
+            if "\n" in text:
+                draw.multiline_text(pos, text, font=font, fill=fill, align=align)
+            else:
+                draw.text(pos, text, font=font, fill=fill, align=align)
+
     def _to_local_date(self, dt):
-        """Конвертує datetime (aware або naive UTC) до date в київському часі (UTC+3)."""
         if isinstance(dt, datetime):
             if dt.tzinfo is not None:
                 local_dt = dt.astimezone(timezone(timedelta(hours=3)))
@@ -63,7 +86,6 @@ class ScheduleImageGenerator:
         return dt
 
     def _sort_events_globally(self, events):
-        """Сортує події: спочатку за часом, потім за номером підгрупи."""
         def get_sort_key(ev):
             text = (ev.subject + str(ev.group or "")).lower()
             sg_order = 3
@@ -103,7 +125,11 @@ class ScheduleImageGenerator:
 
     def _prepare_event_content(self, event):
         is_cancelled = getattr(event, 'is_cancelled', False)
-        has_qr = bool(event.links) and not is_cancelled
+        is_unselected = getattr(event, 'is_unselected', False)
+        is_elective = getattr(event, 'is_elective', False)
+        
+        # QR код ховаємо, якщо пару відмінено або вимкнено користувачем
+        has_qr = bool(event.links) and not is_cancelled and not is_unselected
         
         qr_space = (self.QR_SIZE + 30) if has_qr else 0
         content_max_w = self.FIXED_CARD_WIDTH - qr_space - (self.CARD_PADDING * 2) - 50
@@ -112,7 +138,9 @@ class ScheduleImageGenerator:
         grp_raw  = event.group if event.group else ""
         has_sg1  = "підгр. 1" in subj_raw.lower() or "підгр. 1" in grp_raw.lower()
         has_sg2  = "підгр. 2" in subj_raw.lower() or "підгр. 2" in grp_raw.lower()
-        badge_h  = 45 if (is_cancelled or has_sg1 or has_sg2) else 0
+        
+        has_badge = is_cancelled or has_sg1 or has_sg2 or is_elective
+        badge_h  = 45 if has_badge else 0
 
         display_subj = event.subject
         if event.group and "(підгр." not in display_subj.lower():
@@ -139,43 +167,66 @@ class ScheduleImageGenerator:
             'height':      max(min_h, total_h),
             'has_qr':      has_qr,
             'is_cancelled':is_cancelled,
+            'is_unselected':is_unselected,
+            'is_elective': is_elective,
             'has_sg1':     has_sg1,
             'has_sg2':     has_sg2,
             'subj_lines':  subj_lines,
         }
 
-    def _draw_event_card(self, img, draw, x, y, event):
+    def _draw_event_card(self, img, draw, pilmoji, x, y, event):
         data   = self._prepare_event_content(event)
         card_x1 = x + 130
         card_x2 = card_x1 + self.FIXED_CARD_WIDTH
         card_h  = data['height']
+        
+        is_unsel = data['is_unselected']
+        
+        bg_color = self.UNSEL_BG if is_unsel else self.CARD_BG
+        txt_main = self.UNSEL_TEXT if is_unsel else self.TEXT_MAIN
+        txt_sec  = self.UNSEL_TEXT if is_unsel else self.TEXT_SEC
 
         bar_color = self.ACCENT_GREEN
         if data['has_sg1']:   bar_color = self.ACCENT_BLUE
         elif data['has_sg2']: bar_color = self.ACCENT_ORANGE
         if data['is_cancelled'] and not (data['has_sg1'] or data['has_sg2']):
             bar_color = self.ACCENT_RED
+            
+        if is_unsel:
+            bar_color = self.UNSEL_BAR
 
         draw.rounded_rectangle([card_x1+3, y+3, card_x2+3, y+card_h+3], radius=15, fill="#00000008")
-        draw.rounded_rectangle([card_x1,   y,   card_x2,   y+card_h],   radius=15, fill=self.CARD_BG)
+        draw.rounded_rectangle([card_x1,   y,   card_x2,   y+card_h],   radius=15, fill=bg_color)
         draw.rounded_rectangle([card_x1+10, y+15, card_x1+18, y+card_h-15], radius=4, fill=bar_color)
 
         curr_y  = y + self.CARD_PADDING
         badge_x = card_x1 + 35
         badge_added = False
 
+        # ПЛАШКА: Обрано / Не обрано (для вибіркових та ВП)
+        if data['is_elective']:
+            badge_bg = self.ACCENT_RED if is_unsel else self.ACCENT_GREEN
+            badge_text = "НЕ ОБРАНО" if is_unsel else "ОБРАНО"
+            
+            draw.rounded_rectangle([badge_x, curr_y, badge_x+165, curr_y+35], radius=8, fill=badge_bg)
+            self._draw_text(draw, pilmoji, (badge_x+15, curr_y+4), badge_text, font=self.font_status, fill="white")
+            badge_x += 180
+            badge_added = True
+
         if data['has_sg1']:
-            draw.rounded_rectangle([badge_x, curr_y, badge_x+165, curr_y+35], radius=8, fill=self.ACCENT_BLUE)
-            draw.text((badge_x+15, curr_y+4), "Підгрупа 1", font=self.font_status, fill="white")
+            badge_bg = self.UNSEL_BAR if is_unsel else self.ACCENT_BLUE
+            draw.rounded_rectangle([badge_x, curr_y, badge_x+165, curr_y+35], radius=8, fill=badge_bg)
+            self._draw_text(draw, pilmoji, (badge_x+15, curr_y+4), "Підгрупа 1", font=self.font_status, fill="white")
             badge_x += 180; badge_added = True
         elif data['has_sg2']:
-            draw.rounded_rectangle([badge_x, curr_y, badge_x+165, curr_y+35], radius=8, fill=self.ACCENT_ORANGE)
-            draw.text((badge_x+15, curr_y+4), "Підгрупа 2", font=self.font_status, fill=self.TEXT_MAIN)
+            badge_bg = self.UNSEL_BAR if is_unsel else self.ACCENT_ORANGE
+            draw.rounded_rectangle([badge_x, curr_y, badge_x+165, curr_y+35], radius=8, fill=badge_bg)
+            self._draw_text(draw, pilmoji, (badge_x+15, curr_y+4), "Підгрупа 2", font=self.font_status, fill="white" if is_unsel else self.TEXT_MAIN)
             badge_x += 180; badge_added = True
 
         if data['is_cancelled']:
-            draw.rounded_rectangle([badge_x, curr_y, badge_x+165, curr_y+35], radius=8, fill=self.ACCENT_RED)
-            draw.text((badge_x+15, curr_y+4), "ВІДМІНЕНО", font=self.font_status, fill="white")
+            draw.rounded_rectangle([badge_x, curr_y, badge_x+165, curr_y+35], radius=8, fill=self.UNSEL_BAR if is_unsel else self.ACCENT_RED)
+            self._draw_text(draw, pilmoji, (badge_x+15, curr_y+4), "ВІДМІНЕНО", font=self.font_status, fill="white")
             badge_added = True
 
         if badge_added: curr_y += 45
@@ -190,22 +241,22 @@ class ScheduleImageGenerator:
 
         subj_x = card_x1 + 35
         for line in data['subj_lines']:
-            draw.text((subj_x, curr_y), line, font=self.font_subject, fill=self.TEXT_MAIN)
+            self._draw_text(draw, pilmoji, (subj_x, curr_y), line, font=self.font_subject, fill=txt_main)
             curr_y += 48
 
         for line in data['lines']['meta']:
-            draw.text((subj_x, curr_y+5), line, font=self.font_details, fill=self.TEXT_SEC)
+            self._draw_text(draw, pilmoji, (subj_x, curr_y+5), line, font=self.font_details, fill=txt_sec)
             curr_y += 38
 
         for line in data['lines']['teacher']:
-            draw.text((subj_x, curr_y+5), line, font=self.font_details, fill=self.TEXT_SEC)
+            self._draw_text(draw, pilmoji, (subj_x, curr_y+5), line, font=self.font_details, fill=txt_sec)
 
         return card_h
 
-    def _draw_time_column(self, draw, x, y, h, start_time, end_time):
+    def _draw_time_column(self, draw, pilmoji, x, y, h, start_time, end_time):
         draw.rounded_rectangle([x, y, x+110, y+h], radius=15, fill=self.TIME_BG)
-        draw.text((x+15, y+20), start_time.strftime('%H:%M'), font=self.font_time, fill=self.TEXT_MAIN)
-        draw.text((x+15, y+60), end_time.strftime('%H:%M'),   font=self.font_time, fill=self.TEXT_SEC)
+        self._draw_text(draw, pilmoji, (x+15, y+20), start_time.strftime('%H:%M'), font=self.font_time, fill=self.TEXT_MAIN)
+        self._draw_text(draw, pilmoji, (x+15, y+60), end_time.strftime('%H:%M'),   font=self.font_time, fill=self.TEXT_SEC)
 
     def create_day_image(self, events, date_obj) -> BytesIO:
         events = self._sort_events_globally(events)
@@ -230,36 +281,36 @@ class ScheduleImageGenerator:
 
         img  = Image.new('RGB', (self.WIDTH, max(400, total_h)), color=self.BG_COLOR)
         draw = ImageDraw.Draw(img)
+        pilmoji = Pilmoji(img) if HAS_PILMOJI else None
 
         local_date = self._to_local_date(date_obj)
 
         day_names = ['Понеділок','Вівторок','Середа','Четвер',"П'ятниця","Субота","Неділя"]
         header = f"{local_date.strftime('%d.%m.%Y')} ({day_names[local_date.weekday()]})"
-        draw.text((self.PADDING, self.PADDING), header, font=self.font_header, fill=self.TEXT_MAIN)
+        self._draw_text(draw, pilmoji, (self.PADDING, self.PADDING), header, font=self.font_header, fill=self.TEXT_MAIN)
 
         cursor_y = 130
         if not events:
-            draw.text((self.PADDING, cursor_y), "Пар немає, можна відпочивати!", font=self.font_subject, fill=self.TEXT_SEC)
-            # Додаємо висоту тексту + відступ, щоб crop не обрізав його
+            self._draw_text(draw, pilmoji, (self.PADDING, cursor_y), "Пар немає, можна відпочивати! 🏖️", font=self.font_subject, fill=self.TEXT_SEC)
             cursor_y += 80 
         else:
             for key in sorted_keys:
                 h = slot_data[key]
-                self._draw_time_column(draw, self.PADDING, cursor_y, h, key[0], key[1])
+                self._draw_time_column(draw, pilmoji, self.PADDING, cursor_y, h, key[0], key[1])
                 sub_y = cursor_y
                 for i, ev in enumerate(grouped[key]):
-                    sub_y += self._draw_event_card(img, draw, self.PADDING, sub_y, ev)
+                    sub_y += self._draw_event_card(img, draw, pilmoji, self.PADDING, sub_y, ev)
                     if i < len(grouped[key])-1: sub_y += 20
                 cursor_y += h + 40
 
+        if pilmoji: pilmoji.close()
+
         bio = BytesIO()
-        # Тепер cursor_y матиме правильне значення (130 + 80 = 210), і текст влізе повністю
         img.crop((0, 0, self.WIDTH, cursor_y + 20)).save(bio, 'PNG')
         bio.seek(0)
         return bio
 
-    def _draw_matrix_card(self, draw, x, y, w, h, events_in_cell):
-        # Жорстке сортування безпосередньо перед формуванням списку для малювання
+    def _draw_matrix_card(self, draw, pilmoji, x, y, w, h, events_in_cell):
         def get_sg_order(ev):
             text = (ev.subject + str(ev.group or "")).lower()
             if "підгр. 1" in text: return 1
@@ -282,16 +333,24 @@ class ScheduleImageGenerator:
             has_can = has_can or is_cancelled
             display_events.append((ev, is_cancelled, ev_has_sg1, ev_has_sg2))
 
+        # Перевіряємо, чи всі події в комірці вимкнені
+        is_all_unsel = all(getattr(ev, 'is_unselected', False) for ev in events_in_cell)
+
         bar_color = self.ACCENT_GREEN
         if has_sg1 and not has_sg2:   bar_color = self.ACCENT_BLUE
         elif has_sg2 and not has_sg1: bar_color = self.ACCENT_ORANGE
         elif has_can:                 bar_color = self.ACCENT_RED
+        
+        if is_all_unsel:
+            bar_color = self.UNSEL_BAR
+
+        bg_color = self.UNSEL_BG if (has_can or is_all_unsel) else self.CARD_BG
 
         draw.rounded_rectangle([x, y, x+w, y+h], radius=4,
-                                fill="#F0F4F8" if has_can else self.CARD_BG,
+                                fill=bg_color,
                                 outline=self.BORDER_COLOR, width=1)
 
-        if has_sg1 and has_sg2:
+        if has_sg1 and has_sg2 and not is_all_unsel:
             mid = y + h // 2
             draw.rounded_rectangle([x+4, y+4,  x+12, mid],    radius=4, fill=self.ACCENT_BLUE)
             draw.rounded_rectangle([x+4, mid,   x+12, y+h-4], radius=4, fill=self.ACCENT_ORANGE)
@@ -305,8 +364,14 @@ class ScheduleImageGenerator:
         curr_y  = y + 8
 
         for ev, is_can, es1, es2 in display_events:
+            is_unsel = getattr(ev, 'is_unselected', False)
+            txt_main = self.UNSEL_TEXT if is_unsel else self.TEXT_MAIN
+            txt_sec  = self.UNSEL_TEXT if is_unsel else self.TEXT_SEC
+            
             display_subj = ev.subject
-            if is_can:
+            if is_unsel:
+                display_subj = "❌ " + display_subj
+            elif is_can:
                 display_subj = "[ВІДМІНА] " + display_subj \
                     .replace("[Увага! ЗАНЯТТЯ ВІДМІНЕНО!]", "") \
                     .replace("ВІДМІНЕНО!", "").strip()
@@ -323,7 +388,7 @@ class ScheduleImageGenerator:
 
             for line in subj_lines[:max_subj_lines]:
                 if curr_y + 20 > y + h - 6: break
-                draw.text((txt_x, curr_y), line, font=self.font_matrix_subj, fill=self.TEXT_MAIN)
+                self._draw_text(draw, pilmoji, (txt_x, curr_y), line, font=self.font_matrix_subj, fill=txt_main)
                 curr_y += 22
 
             meta = []
@@ -333,28 +398,31 @@ class ScheduleImageGenerator:
             if meta_str:
                 for ml in self._wrap_text(meta_str, self.font_matrix_det, txt_w)[:2]:
                     if curr_y + 16 > y + h - 6: break
-                    draw.text((txt_x, curr_y + 2), ml, font=self.font_matrix_det, fill=self.TEXT_SEC)
+                    self._draw_text(draw, pilmoji, (txt_x, curr_y + 2), ml, font=self.font_matrix_det, fill=txt_sec)
                     curr_y += 18
 
             if ev.teacher:
                 for tl in self._wrap_text(ev.teacher, self.font_matrix_det, txt_w)[:2]:
                     if curr_y + 16 > y + h - 6: break
-                    draw.text((txt_x, curr_y + 2), tl, font=self.font_matrix_det, fill=self.TEXT_SEC)
+                    self._draw_text(draw, pilmoji, (txt_x, curr_y + 2), tl, font=self.font_matrix_det, fill=txt_sec)
                     curr_y += 18
 
             curr_y += 6
 
     def _estimate_cell_height(self, events_in_cell, txt_w):
-        """Оцінює потрібну висоту клітинки для заданих подій."""
         total = 8
         for ev in events_in_cell:
             subj_raw = ev.subject
             grp_raw  = ev.group if ev.group else ""
             es1 = "підгр. 1" in subj_raw.lower() or "підгр. 1" in grp_raw.lower()
             es2 = "підгр. 2" in subj_raw.lower() or "підгр. 2" in grp_raw.lower()
+            is_unsel = getattr(ev, 'is_unselected', False)
+            
             display_subj = ev.subject
+            if is_unsel: display_subj = "❌ " + display_subj
             if es1: display_subj += " (підгр. 1)"
             if es2: display_subj += " (підгр. 2)"
+            
             subj_lines = self._wrap_text(display_subj, self.font_matrix_subj, txt_w)
             total += len(subj_lines) * 22
 
@@ -416,9 +484,26 @@ class ScheduleImageGenerator:
                 for i, (start, _) in enumerate(PAIR_TIMES):
                     if time_str == start:
                         grid[d_idx][i].append(ev)
-                        active_pairs.add(i)
-                        day_has_events[d_idx] = True
                         break
+
+        # СИСТЕМА КОМПРЕСІЇ ДНІВ "ВІЙСЬКОВОЇ ПІДГОТОВКИ"
+        vp_days = {}
+        for d in range(cols):
+            day_events = [ev for p in range(len(PAIR_TIMES)) for ev in grid[d][p]]
+            if day_events and all("військова підготовка" in ev.raw_subject.lower() for ev in day_events):
+                vp_days[d] = day_events
+                # Очищаємо сітку для цього дня, щоб вона не розтягувала рядки по вертикалі
+                for p in range(len(PAIR_TIMES)):
+                    grid[d][p] = []
+
+        # Перераховуємо активні пари та дні після компресії
+        for d in range(cols):
+            if d in vp_days:
+                day_has_events[d] = True
+            for p_idx in range(len(PAIR_TIMES)):
+                if grid[d][p_idx]:
+                    active_pairs.add(p_idx)
+                    day_has_events[d] = True
 
         if not active_pairs:
             min_pair, max_pair = 0, 3
@@ -436,10 +521,12 @@ class ScheduleImageGenerator:
             row_heights[p_idx] = max_needed
 
         total_rows_h = sum(row_heights.values())
+        if total_rows_h == 0: total_rows_h = ROW_H_MIN * 4
         height = padding * 2 + header_h + total_rows_h
 
         img  = Image.new('RGB', (width, height), color=self.BG_COLOR)
         draw = ImageDraw.Draw(img)
+        pilmoji = Pilmoji(img) if HAS_PILMOJI else None
 
         full_day_names = ["Понеділок", "Вівторок", "Середа", "Четвер", "П'ятниця", "Субота"]
 
@@ -453,11 +540,11 @@ class ScheduleImageGenerator:
             date_text = f"({curr_date.strftime('%d.%m')})"
 
             bbox_d  = draw.textbbox((0,0), day_text,  font=self.font_matrix_header_day)
-            draw.text((x + (col_w-(bbox_d[2]-bbox_d[0]))/2, padding+15),
+            self._draw_text(draw, pilmoji, (x + (col_w-(bbox_d[2]-bbox_d[0]))/2, padding+15),
                        day_text, font=self.font_matrix_header_day, fill=self.TEXT_MAIN)
 
             bbox_da = draw.textbbox((0,0), date_text, font=self.font_matrix_date)
-            draw.text((x + (col_w-(bbox_da[2]-bbox_da[0]))/2, padding+55),
+            self._draw_text(draw, pilmoji, (x + (col_w-(bbox_da[2]-bbox_da[0]))/2, padding+55),
                        date_text, font=self.font_matrix_date, fill=self.TEXT_SEC)
 
         curr_y = padding + header_h
@@ -474,14 +561,17 @@ class ScheduleImageGenerator:
                                     outline=self.BORDER_COLOR, width=1)
 
             bb_s = draw.textbbox((0,0), start_t, font=self.font_matrix_time)
-            draw.text((tx + (tw-(bb_s[2]-bb_s[0]))/2, curr_y + 38),
+            self._draw_text(draw, pilmoji, (tx + (tw-(bb_s[2]-bb_s[0]))/2, curr_y + 38),
                        start_t, font=self.font_matrix_time, fill=self.TEXT_MAIN)
 
             bb_e = draw.textbbox((0,0), end_t, font=self.font_matrix_date)
-            draw.text((tx + (tw-(bb_e[2]-bb_e[0]))/2, curr_y + 76),
+            self._draw_text(draw, pilmoji, (tx + (tw-(bb_e[2]-bb_e[0]))/2, curr_y + 76),
                        end_t, font=self.font_matrix_date, fill=self.TEXT_SEC)
 
             for d in range(cols):
+                if d in vp_days:
+                    continue # Пропускаємо відмальовку порожніх клітинок для дня з Військовою Підготовкою
+                
                 x = padding + time_w + d * col_w
 
                 if not day_has_events[d]:
@@ -490,23 +580,52 @@ class ScheduleImageGenerator:
                         draw.rounded_rectangle([x+2, curr_y, x+col_w-2, curr_y+empty_h],
                                                 radius=4, fill="#F0F4F8",
                                                 outline=self.BORDER_COLOR, width=1)
-                        msg  = "Пар немає!\nМожна відпочивати."
+                        msg  = "Пар немає!\nМожна відпочивати. 🏖️"
                         bbox = draw.multiline_textbbox((0,0), msg, font=self.font_matrix_empty)
                         tw_m = bbox[2]-bbox[0]; th_m = bbox[3]-bbox[1]
-                        draw.multiline_text(
-                            (x+(col_w-tw_m)/2, curr_y+(empty_h-th_m)/2),
+                        self._draw_text(draw, pilmoji, (x+(col_w-tw_m)/2, curr_y+(empty_h-th_m)/2),
                             msg, font=self.font_matrix_empty, fill="#8899A6", align="center")
                     continue
 
                 cell_events = grid[d][p_idx]
                 if cell_events:
-                    self._draw_matrix_card(draw, x+2, curr_y, col_w-4, row_h-6, cell_events)
+                    self._draw_matrix_card(draw, pilmoji, x+2, curr_y, col_w-4, row_h-6, cell_events)
                 else:
                     draw.rounded_rectangle([x+2, curr_y, x+col_w-2, curr_y+row_h-6],
                                             radius=4, fill=self.CARD_BG,
                                             outline=self.BORDER_COLOR, width=1)
 
             curr_y += row_h
+
+        # МАЛЮЄМО ВЕЛИКИЙ БЛОК ДЛЯ ВІЙСЬКОВОЇ ПІДГОТОВКИ НА ВЕСЬ ДЕНЬ
+        for d, vp_events in vp_days.items():
+            x = padding + time_w + d * col_w
+            y_start = padding + header_h
+            h_block = total_rows_h - 6
+            
+            is_unsel = all(getattr(e, 'is_unselected', False) for e in vp_events)
+            
+            bg = self.UNSEL_BG if is_unsel else self.CARD_BG
+            bar = self.UNSEL_BAR if is_unsel else self.ACCENT_GREEN
+            txt_color = self.UNSEL_TEXT if is_unsel else self.TEXT_MAIN
+            
+            draw.rounded_rectangle([x+2, y_start, x+col_w-2, y_start+h_block], radius=4, fill=bg, outline=self.BORDER_COLOR, width=1)
+            draw.rounded_rectangle([x+4, y_start+4, x+12, y_start+h_block-4], radius=4, fill=bar)
+            
+            msg = "Військова\nпідготовка"
+            if is_unsel:
+                # Зменшили відступ, щоб текст добре ставав у комірку
+                msg = "❌ НЕ ОБРАНО\n" + msg
+                
+            # Використовуємо трохи менший шрифт (розмір 28)
+            vp_font = self.font_details
+                
+            bbox = draw.multiline_textbbox((0,0), msg, font=vp_font)
+            tw_m = bbox[2]-bbox[0]; th_m = bbox[3]-bbox[1]
+            
+            self._draw_text(draw, pilmoji, (x + 18 + (col_w-24-tw_m)/2, y_start + (h_block-th_m)/2), msg, font=vp_font, fill=txt_color, align="center")
+
+        if pilmoji: pilmoji.close()
 
         bio = BytesIO()
         img.save(bio, 'PNG')
