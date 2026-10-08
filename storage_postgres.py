@@ -1,20 +1,3 @@
-"""
-Postgres-версія зберігання для бота розкладу.
-
-Замінює UserManager та ScheduleCache з bot_global.py на варіант, що зберігає
-дані у Heroku Postgres замість локальних JSON-файлів (які стираються при
-рестарті dyno чи новому деплої).
-
-Публічний інтерфейс класів (методи, атрибут .users, .to_dict()/from_dict())
-залишився ідентичним, тож увесь інший код у bot_global.py (ScheduleBot,
-хендлери команд тощо) МІНЯТИ НЕ ТРЕБА — досить замінити імпорт цих двох
-класів + ScheduleEvent (з нього ж, без змін) на цей модуль.
-
-Потрібна змінна середовища DATABASE_URL — Heroku додає її автоматично
-одразу після:
-    heroku addons:create heroku-postgresql:essential-0
-"""
-
 import os
 import json
 import logging
@@ -26,34 +9,13 @@ import psycopg2.extras
 
 logger = logging.getLogger(__name__)
 
-
-# --- Підключення ---
-
 def get_db_connection():
-    """Відкриває нове з'єднання з Postgres.
-
-    Для невеликого бота (низьке навантаження, синхронні виклики з
-    telegram-хендлерів) відкриття/закриття з'єднання на кожну операцію —
-    простіше й безпечніше за пул: Heroku Postgres на плані Essential має
-    ліміт лише 20-40 одночасних з'єднань, а Heroku інколи розриває
-    "залежані" з'єднання, тож довгоживучий пул довелося б додатково
-    обробляти на предмет "stale" конекшенів. Якщо навантаження зросте —
-    це перше місце, де варто додати psycopg2.pool або pgbouncer.
-    """
     db_url = os.getenv("DATABASE_URL")
     if not db_url:
-        raise RuntimeError(
-            "DATABASE_URL не знайдено в змінних середовища. "
-            "Перевірте `heroku config` — аддон Postgres повинен додати її сам."
-        )
-    # Heroku Postgres інколи видає URL зі схемою 'postgres://',
-    # а деякі версії psycopg2/SQLAlchemy вимагають 'postgresql://'.
+        raise RuntimeError("DATABASE_URL не знайдено в змінних середовища.")
     if db_url.startswith("postgres://"):
         db_url = db_url.replace("postgres://", "postgresql://", 1)
     return psycopg2.connect(db_url, sslmode="require")
-
-
-# --- Users ---
 
 class UserSettings:
     def __init__(self, chat_id: int):
@@ -66,6 +28,7 @@ class UserSettings:
         self.pinned_messages: List[int] = []
         self.disabled_electives: List[str] = []
         self.debug_mode = False
+        self.theme = "light"
 
     def to_dict(self) -> dict:
         return {
@@ -77,7 +40,8 @@ class UserSettings:
             'weekly_notifications': self.weekly_notifications,
             'pinned_messages': self.pinned_messages,
             'disabled_electives': self.disabled_electives,
-            'debug_mode': self.debug_mode
+            'debug_mode': getattr(self, 'debug_mode', False),
+            'theme': getattr(self, 'theme', 'light')
         }
 
     @classmethod
@@ -91,6 +55,7 @@ class UserSettings:
         settings.pinned_messages = data.get('pinned_messages', [])
         settings.disabled_electives = data.get('disabled_electives', [])
         settings.debug_mode = data.get('debug_mode', False)
+        settings.theme = data.get('theme', 'light')
         return settings
 
     @classmethod
@@ -104,15 +69,10 @@ class UserSettings:
         s.pinned_messages = row['pinned_messages'] or []
         s.disabled_electives = row.get('disabled_electives') or []
         s.debug_mode = row.get('debug_mode', False)
+        s.theme = row.get('theme', 'light')
         return s
 
-
 class UserManager:
-    """Той самий інтерфейс, що й раніше (get_user_settings,
-    update_user_group, update_user_setting, .users), але дані зберігаються
-    в Postgres. self.users лишається в пам'яті як кеш для швидкого читання
-    й для місць у коді, що ітерують self.user_manager.users.items()."""
-
     def __init__(self):
         self.users: Dict[int, UserSettings] = {}
         self._ensure_schema()
@@ -133,6 +93,11 @@ class UserManager:
                         disabled_electives JSONB NOT NULL DEFAULT '[]'::jsonb,
                         debug_mode BOOLEAN NOT NULL DEFAULT FALSE
                     )
+                """)
+                # Безпечне додавання нової колонки, якщо вона ще не існує
+                cur.execute("""
+                    ALTER TABLE users 
+                    ADD COLUMN IF NOT EXISTS theme TEXT NOT NULL DEFAULT 'light';
                 """)
             conn.commit()
 
@@ -156,8 +121,8 @@ class UserManager:
                         INSERT INTO users (chat_id, group_name, group_id,
                             change_notifications, daily_notifications,
                             weekly_notifications, pinned_messages,
-                            disabled_electives, debug_mode)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            disabled_electives, debug_mode, theme)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (chat_id) DO UPDATE SET
                             group_name = EXCLUDED.group_name,
                             group_id = EXCLUDED.group_id,
@@ -166,14 +131,15 @@ class UserManager:
                             weekly_notifications = EXCLUDED.weekly_notifications,
                             pinned_messages = EXCLUDED.pinned_messages,
                             disabled_electives = EXCLUDED.disabled_electives,
-                            debug_mode = EXCLUDED.debug_mode
+                            debug_mode = EXCLUDED.debug_mode,
+                            theme = EXCLUDED.theme
                     """, (
                         settings.chat_id, settings.group_name, settings.group_id,
                         settings.change_notifications, settings.daily_notifications,
                         settings.weekly_notifications,
                         psycopg2.extras.Json(settings.pinned_messages),
                         psycopg2.extras.Json(settings.disabled_electives),
-                        settings.debug_mode
+                        settings.debug_mode, settings.theme
                     ))
                 conn.commit()
         except Exception as e:
@@ -197,18 +163,7 @@ class UserManager:
         setattr(settings, setting, value)
         self._upsert(settings)
 
-
-# --- Schedule cache ---
-# ScheduleEvent / ChangeType / ScheduleChange лишаються без змін —
-# імпортуються з bot_global.py як і раніше. Тут очікуємо, що вони вже є
-# в області видимості (див. інструкцію з інтеграції нижче).
-
 def build_schedule_cache_class(ScheduleEvent, ChangeType, ScheduleChange, TIMEZONE):
-    """Фабрика, щоб не дублювати ScheduleEvent/ChangeType в цьому файлі.
-    У bot_global.py достатньо викликати:
-        ScheduleCache = build_schedule_cache_class(ScheduleEvent, ChangeType, ScheduleChange, TIMEZONE)
-    одразу після визначення цих класів (замість старого class ScheduleCache)."""
-
     class ScheduleCache:
         def __init__(self):
             self._group_caches: Dict[str, List[ScheduleEvent]] = {}
@@ -273,8 +228,7 @@ def build_schedule_cache_class(ScheduleEvent, ChangeType, ScheduleChange, TIMEZO
                         continue
                     changes.append(ScheduleChange(ChangeType.REMOVED, ev))
                 elif ev.hash != new_map[key].hash:
-                    changes.append(ScheduleChange(
-                        ChangeType.MODIFIED, new_map[key], ev))
+                    changes.append(ScheduleChange(ChangeType.MODIFIED, new_map[key], ev))
 
             for key, ev in new_map.items():
                 if key not in old_map:
@@ -288,4 +242,3 @@ def build_schedule_cache_class(ScheduleEvent, ChangeType, ScheduleChange, TIMEZO
             return changes
 
     return ScheduleCache
-    
