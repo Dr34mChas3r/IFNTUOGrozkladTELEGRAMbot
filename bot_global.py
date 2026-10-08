@@ -13,7 +13,7 @@ from io import BytesIO
 
 import requests
 import urllib3
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, ChatMember
 from telegram.constants import ChatType, ParseMode
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -156,52 +156,20 @@ class ScheduleChange:
         self.event = event
         self.old_event = old_event
 
-class UserSettings:
-    def __init__(self, chat_id: int):
-        self.chat_id = chat_id
-        self.group_name: Optional[str] = None
-        self.group_id: Optional[str] = None
-        self.change_notifications = False
-        self.daily_notifications = False
-        self.weekly_notifications = False
-        self.pinned_messages: List[int] = []
-        self.disabled_electives: List[str] = []
-        self.debug_mode = False
+# Імпортуємо менеджери та налаштування з Postgres
+from storage_postgres import UserSettings, UserManager, build_schedule_cache_class
+ScheduleCache = build_schedule_cache_class(ScheduleEvent, ChangeType, ScheduleChange, TIMEZONE)
 
-    def to_dict(self) -> dict:
-        return {
-            'chat_id': self.chat_id,
-            'group_name': self.group_name,
-            'group_id': self.group_id,
-            'change_notifications': self.change_notifications,
-            'daily_notifications': self.daily_notifications,
-            'weekly_notifications': self.weekly_notifications,
-            'pinned_messages': self.pinned_messages,
-            'disabled_electives': self.disabled_electives,
-            'debug_mode': getattr(self, 'debug_mode', False)
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> 'UserSettings':
-        settings = cls(data['chat_id'])
-        settings.group_name = data.get('group_name')
-        settings.group_id = data.get('group_id')
-        settings.change_notifications = data.get('change_notifications', False)
-        settings.daily_notifications = data.get('daily_notifications', False)
-        settings.weekly_notifications = data.get('weekly_notifications', False)
-        settings.pinned_messages = data.get('pinned_messages', [])
-        settings.disabled_electives = data.get('disabled_electives', [])
-        settings.debug_mode = data.get('debug_mode', False)
-        return settings
-
-from storage_postgres import UserManager, build_schedule_cache_class
-ScheduleCache = build_schedule_cache_class(
-    ScheduleEvent, ChangeType, ScheduleChange, TIMEZONE)
 
 class NungParser:
     API_URL = "https://dekanat.nung.edu.ua/cgi-bin/timetable_export.cgi"
-    HTML_URL = "https://example.com"
+    HTML_URL = "https://dekanat.nung.edu.ua/cgi-bin/timetable.cgi"
     _global_cache = {'teachers': [], 'rooms': [], 'timestamp': None}
+
+    _URL_RE = re.compile(r'https?://[^\s<>"\']+')
+    _TITLES_RE = re.compile(
+        r'(?i)(зав\.\s*кафедрою|зав\.\s*каф\.|старший\s+викладач|ст\.\s*викл\.|доцент|професор|викладач|асистент)'
+    )
 
     @staticmethod
     def _normalize(text):
@@ -213,11 +181,22 @@ class NungParser:
         return text.translate(trans_table)
 
     @staticmethod
+    def _key(text: str) -> str:
+        text = NungParser._normalize(text or "").replace('(в)', '')
+        return re.sub(r'[^\w]', '', text)
+
+    @staticmethod
+    def _teacher_key(text: str) -> str:
+        text = NungParser._TITLES_RE.sub('', text or '').replace('*', '').strip()
+        tokens = text.split()
+        return NungParser._key(tokens[0]) if tokens else ""
+
+    @staticmethod
     def get_group_id(group_name: str) -> tuple[Optional[str], str]:
         params = {'req_type': 'obj_list', 'req_mode': 'group', 'show_ID': 'yes',
                   'req_format': 'json', 'coding_mode': 'WINDOWS-1251', 'bs': 'ok'}
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
         try:
             response = requests.get(NungParser.API_URL, params=params, headers=headers, timeout=10, verify=False)
@@ -304,13 +283,57 @@ class NungParser:
         return []
 
     @staticmethod
+    def _parse_cell_blocks(content_td) -> List[Dict]:
+        blocks: List[Dict] = []
+        current = None
+
+        def new_block():
+            b = {'subject': '', 'subgroup': None, 'teacher': '', 'urls': []}
+            blocks.append(b)
+            return b
+
+        def add_url(block, url):
+            url = url.strip().rstrip('.,;)')
+            if url and url not in block['urls']:
+                block['urls'].append(url)
+
+        for el in content_td.descendants:
+            if not isinstance(el, Tag):
+                continue
+            classes = el.get('class') or []
+
+            if el.name == 'span' and 'p_name' in classes:
+                current = new_block()
+                current['subject'] = el.get_text(' ', strip=True)
+            elif el.name == 'span' and 'gr2_name' in classes:
+                m = re.search(r'підгр\.\s*(\d+)', el.get_text(' ', strip=True), re.IGNORECASE)
+                if m and current is not None:
+                    current['subgroup'] = m.group(1)
+            elif el.name == 'span' and 't_name' in classes:
+                if current is not None:
+                    current['teacher'] = el.get_text(' ', strip=True)
+            elif el.name == 'span' and 'comment' in classes:
+                if current is None:
+                    current = new_block()
+                for url in NungParser._URL_RE.findall(el.get_text(' ', strip=True)):
+                    add_url(current, url)
+            elif el.name == 'a' and el.get('href'):
+                href = el['href'].strip()
+                if href.startswith(('http://', 'https://')):
+                    if current is None:
+                        current = new_block()
+                    add_url(current, href)
+
+        return blocks
+
+    @staticmethod
     def _fetch_links_data(group_name: str, start_date: date, end_date: date) -> List[Dict]:
-        links_data = []
+        links_data: List[Dict] = []
         if not group_name:
             return links_data
 
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Content-Type': 'application/x-www-form-urlencoded',
             'Referer': 'https://dekanat.nung.edu.ua/cgi-bin/timetable.cgi?n=700'
         }
@@ -322,62 +345,78 @@ class NungParser:
                 'sdate': start_date.strftime('%d.%m.%Y'),
                 'edate': end_date.strftime('%d.%m.%Y')
             }
-
-            response = requests.post(NungParser.HTML_URL, data=payload, headers=headers, timeout=3, verify=False)
+            response = requests.post(NungParser.HTML_URL, data=payload, headers=headers, timeout=10, verify=False)
             response.encoding = 'windows-1251'
             soup = BeautifulSoup(response.text, 'html.parser')
 
-            for link_div in soup.find_all('div', class_='link'):
-                a_tag = link_div.find('a', href=True)
-                if not a_tag:
+            current_date = None
+            for el in soup.find_all(['h4', 'tr']):
+                if el.name == 'h4':
+                    m = re.match(r'\s*(\d{2}\.\d{2}\.\d{4})', el.get_text(' ', strip=True))
+                    if m:
+                        current_date = m.group(1)
                     continue
 
-                url = a_tag['href']
-                if not any(x in url for x in ['google.com', 'zoom.us', 'teams', 'webex']):
+                if not current_date:
                     continue
 
-                text_chunks = []
-                curr = link_div.previous_sibling
-                while curr:
-                    if curr.name == 'div' and 'link' in curr.get('class', []):
-                        break
-                    if isinstance(curr, str):
-                        text_chunks.append(curr.strip())
-                    elif curr.name not in ['br', 'img']:
-                        text_chunks.append(curr.get_text(separator=' ', strip=True))
-                    curr = curr.previous_sibling
+                tds = el.find_all('td', recursive=False)
+                if len(tds) < 3:
+                    continue
 
-                isolated_text = " ".join(reversed(text_chunks)).strip()
+                time_match = re.search(r'(\d{2}:\d{2})', tds[1].get_text(' ', strip=True))
+                if not time_match:
+                    continue
 
-                date_str, time_str = "", ""
-                try:
-                    table = link_div.find_parent('table')
-                    if table:
-                        h4 = table.find_previous('h4')
-                        if h4:
-                            date_match = re.search(r'\d{2}\.\d{2}\.\d{4}', h4.get_text())
-                            if date_match:
-                                date_str = date_match.group(0)
+                for block in NungParser._parse_cell_blocks(tds[2]):
+                    block['date'] = current_date
+                    block['time'] = time_match.group(1)
+                    links_data.append(block)
 
-                    tr = link_div.find_parent('tr')
-                    if tr:
-                        tds = tr.find_all('td')
-                        if len(tds) >= 2:
-                            time_match = re.search(r'\d{2}:\d{2}', tds[1].get_text(separator=' '))
-                            if time_match:
-                                time_str = time_match.group(0)
-                except Exception:
-                    pass
-
-                links_data.append({
-                    'url': url,
-                    'text': isolated_text,
-                    'date': date_str,
-                    'time': time_str
-                })
         except Exception as e:
             logger.error(f"HTML Link Parsing Error: {e}")
+
         return links_data
+
+    @staticmethod
+    def _match_links(links_data: List[Dict], start_dt: datetime, subject_text: str,
+                     teacher_name: str, subg_num: Optional[str]) -> List[str]:
+        d = start_dt.strftime('%d.%m.%Y')
+        t = start_dt.strftime('%H:%M')
+        candidates = [b for b in links_data if b['date'] == d and b['time'] == t]
+        if not candidates:
+            return []
+
+        subj_key = NungParser._key(subject_text)
+        teacher_key = NungParser._teacher_key(teacher_name)
+
+        scored = []
+        for b in candidates:
+            score = 0
+            if b['subgroup'] and subg_num:
+                if b['subgroup'] != subg_num:
+                    continue
+                score += 4
+            b_subj = NungParser._key(b['subject'])
+            if b_subj and subj_key and (b_subj in subj_key or subj_key in b_subj):
+                score += 3
+            b_teacher = NungParser._teacher_key(b['teacher'])
+            if teacher_key and b_teacher and teacher_key == b_teacher:
+                score += 2
+            scored.append((score, b))
+
+        if not scored:
+            return []
+
+        best = max(s for s, _ in scored)
+        if best == 0 and len(scored) > 1:
+            return []
+
+        top = [b for s, b in scored if s == best]
+        if len({tuple(b['urls']) for b in top}) > 1:
+            return []
+
+        return list(top[0]['urls'])
 
     @staticmethod
     def get_schedule(obj_id: str, start_date: date = None, end_date: date = None, obj_type: str = 'group', group_name: str = None) -> List[ScheduleEvent]:
@@ -388,7 +427,7 @@ class NungParser:
 
         links_data = []
         if obj_type == 'group' and group_name:
-            links_data = NungParser._fetch_links_data(group_name, start_date, end_date)
+            links_data = NungParser._fetch_links_data(group_name.lower(), start_date, end_date)
 
         return NungParser.get_schedule_json(obj_id, obj_type, start_date, end_date, links_data)
 
@@ -438,7 +477,7 @@ class NungParser:
         }
         
         try:
-            response = requests.get(NungParser.API_URL, params=params, headers=headers, timeout=4, verify=False)
+            response = requests.get(NungParser.API_URL, params=params, headers=headers, timeout=10, verify=False)
             response.encoding = 'utf-8'
             data = response.json()
             
@@ -454,7 +493,6 @@ class NungParser:
             items = root.get('roz_items', []) if root else []
 
             for item in items:
-                # Бронебійний захист від null (None) у JSON
                 desc_raw = item.get('lesson_description')
                 original_desc = str(desc_raw).strip() if desc_raw else ""
 
@@ -463,7 +501,6 @@ class NungParser:
                     teacher = item.get('teacher') or ""
                     room = item.get('room') or ""
                     reservation = item.get('reservation') or ""
-                    
                     parts = [str(title), str(teacher), str(room), str(reservation)]
                     original_desc = " ".join(p.strip() for p in parts if p.strip())
 
@@ -526,51 +563,20 @@ class NungParser:
                         clean_text = item.get('title')
 
                     is_cancelled = "відмінено" in str(item.get('replacement', '')).lower()
+                    
+                    subg_match = (re.search(r'підгр\.\s*(\d+)', group_name, re.IGNORECASE)
+                                  or re.search(r'підгр\.\s*(\d+)', subgroup_info, re.IGNORECASE)
+                                  or re.search(r'підгр\.\s*(\d+)', description, re.IGNORECASE))
+                    subg_num = subg_match.group(1) if subg_match else None
+
                     final_links = []
-
-                    if links_data and teacher_name:
-                        event_date_str = start_dt.strftime('%d.%m.%Y')
-                        event_time_str = start_dt.strftime('%H:%M')
-
-                        cell_links = [ld for ld in links_data if ld['date'] == event_date_str and ld['time'] == event_time_str]
-                        if not cell_links:
-                            cell_links = links_data
-
-                        clean_teacher = re.sub(r'(?i)(доцент|професор|викладач|асистент|зав\.каф\.)', '', teacher_name)
-                        clean_teacher = clean_teacher.replace('*', '').strip()
-                        norm_teacher = NungParser._normalize(clean_teacher.split()[0]) if clean_teacher else ""
-
-                        subj_words = [NungParser._normalize(w) for w in clean_text.split() if len(NungParser._normalize(w)) > 3]
-
-                        best_match_link = None
-                        best_score = -1
-
-                        for ld in cell_links:
-                            norm_cell = NungParser._normalize(ld['text'])
-                            score = 0
-                            if norm_teacher and norm_teacher in norm_cell:
-                                score += 5
-                            for w in subj_words:
-                                if w in norm_cell:
-                                    score += 2
-                            if event_type:
-                                norm_type = NungParser._normalize(event_type)
-                                if norm_type in norm_cell:
-                                    score += 3
-                            subg_match = re.search(r'підгр\.\s*(\d+)', group_name.lower()) or re.search(r'підгр\.\s*(\d+)', subgroup_info.lower())
-                            if subg_match:
-                                subg_num = subg_match.group(1)
-                                if f"підгр. {subg_num}" in ld['text'].lower() or f"підгр.{subg_num}" in ld['text'].lower() or f"({subg_num})" in norm_cell:
-                                    score += 15
-                                elif "підгр" in ld['text'].lower() or re.search(r'\(\d\)', norm_cell):
-                                    score -= 20
-
-                            if score >= 5 and score > best_score:
-                                best_score = score
-                                best_match_link = ld['url']
-
-                        if best_match_link:
-                            final_links.append(best_match_link)
+                    if links_data:
+                        final_links = NungParser._match_links(
+                            links_data, start_dt,
+                            subject_text=original_desc,
+                            teacher_name=teacher_name,
+                            subg_num=subg_num
+                        )
 
                     if not final_links and json_link and not has_multiple_subgroups:
                         final_links.append(json_link)
@@ -734,7 +740,6 @@ class ScheduleBot:
 
     def _apply_elective_filters(self, events: List[ScheduleEvent], chat_id: int):
         s = self.user_manager.get_user_settings(chat_id)
-        # БЕЗПЕЧНИЙ ВИКЛИК: якщо поля немає, беремо пустий список
         disabled_list = getattr(s, 'disabled_electives', [])
         
         for e in events:
@@ -771,7 +776,7 @@ class ScheduleBot:
             self._apply_elective_filters(events, chat_id)
             
             if self.image_generator:
-                photo_bio = self.image_generator.create_week_image(events, tomorrow)
+                photo_bio = self.image_generator.create_week_image(events, tomorrow, theme=getattr(s, 'theme', 'light'))
                 try:
                     msg = await context.bot.send_photo(chat_id=chat_id, photo=photo_bio, caption=f"📅 Тиждень: {s.group_name}")
                     await self._pin_message_with_management(context, chat_id, msg.message_id)
@@ -793,7 +798,7 @@ class ScheduleBot:
             self._apply_elective_filters(events, chat_id)
 
             if self.image_generator:
-                photo_bio = self.image_generator.create_day_image(events, today)
+                photo_bio = self.image_generator.create_day_image(events, today, theme=getattr(s, 'theme', 'light'))
 
                 subject_links = {}
                 for e in events:
@@ -952,10 +957,14 @@ class ScheduleBot:
                 await update.effective_chat.send_message(text_response, parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=kb)
             return
 
+        # Витягуємо тему користувача
+        s = self.user_manager.get_user_settings(update.effective_chat.id)
+        current_theme = getattr(s, 'theme', 'light')
+
         if mode == 'week':
-            bio = self.image_generator.create_week_image(events, date_obj)
+            bio = self.image_generator.create_week_image(events, date_obj, theme=current_theme)
         else:
-            bio = self.image_generator.create_day_image(events, date_obj)
+            bio = self.image_generator.create_day_image(events, date_obj, theme=current_theme)
 
         subject_links = {}
         for e in events:
@@ -1127,7 +1136,6 @@ class ScheduleBot:
             return await update.message.reply_text(msg)
 
         keyboard = []
-        # БЕЗПЕЧНИЙ ВИКЛИК
         disabled_list = getattr(s, 'disabled_electives', [])
         
         for el in sorted(electives):
@@ -1197,6 +1205,8 @@ class ScheduleBot:
 
         kb_rows = []
         if is_admin:
+            theme_icon = "☀️ Світла" if getattr(s, 'theme', 'light') == 'light' else "🌙 Темна"
+            kb_rows.append([InlineKeyboardButton(f"Тема: {theme_icon}", callback_data="toggle_theme")])
             kb_rows.append([InlineKeyboardButton(f"Сповіщення про зміни {'✅' if s.change_notifications else '❌'}", callback_data="toggle_changes")])
             kb_rows.append([InlineKeyboardButton(f"Щоденно о {DAILY_NOTIFICATION_TIME} {'✅' if s.daily_notifications else '❌'}", callback_data="toggle_daily")])
             kb_rows.append([InlineKeyboardButton(f"Розклад на тиждень о {WEEKLY_NOTIFICATION_TIME} {'✅' if s.weekly_notifications else '❌'}", callback_data="toggle_weekly")])
@@ -1227,7 +1237,6 @@ class ScheduleBot:
         query = update.callback_query
         data = query.data
 
-        # ЗУПИНЯЄМО КРУТИЛКУ ОДРАЗУ! (Щоб кнопка не висіла 15 секунд, навіть якщо далі буде помилка)
         try:
             await query.answer()
         except:
@@ -1265,7 +1274,6 @@ class ScheduleBot:
             target_subject = next((e.subject for e in events if e.is_elective and hashlib.md5(e.subject.encode()).hexdigest()[:10] == el_hash), None)
             
             if target_subject:
-                # БЕЗПЕЧНИЙ ВИКЛИК: дістаємо список вимкнених предметів або створюємо порожній
                 disabled_list = getattr(s, 'disabled_electives', [])
                 
                 if target_subject in disabled_list:
@@ -1273,9 +1281,7 @@ class ScheduleBot:
                 else:
                     disabled_list.append(target_subject)
                 
-                # Зберігаємо в базу
                 self.user_manager.update_user_setting(update.effective_chat.id, 'disabled_electives', disabled_list)
-                # Оновлюємо поточний об'єкт у пам'яті безпечним методом
                 setattr(s, 'disabled_electives', disabled_list)
                 
                 await self.electives_command(update, context)
@@ -1284,6 +1290,13 @@ class ScheduleBot:
             if not await self._is_user_admin(update):
                 return await query.answer("⛔ Тільки адміністратори можуть змінювати налаштування!", show_alert=True)
             
+            if data == "toggle_theme":
+                s = self.user_manager.get_user_settings(update.effective_chat.id)
+                new_theme = "dark" if getattr(s, 'theme', 'light') == "light" else "light"
+                self.user_manager.update_user_setting(update.effective_chat.id, 'theme', new_theme)
+                await self.notifications_command(update, context)
+                return
+
             if data == "toggle_changes":
                 setting = "change_notifications"
             elif data == "toggle_daily":
@@ -1313,8 +1326,12 @@ class ScheduleBot:
 
             events = await asyncio.to_thread(NungParser.get_schedule, obj_id, start_date=target_date, end_date=target_date, obj_type=obj_mode)
 
+            # Витягуємо тему користувача для глобального пошуку
+            s = self.user_manager.get_user_settings(update.effective_chat.id)
+            current_theme = getattr(s, 'theme', 'light')
+
             if self.image_generator:
-                bio = self.image_generator.create_day_image(events, target_date)
+                bio = self.image_generator.create_day_image(events, target_date, theme=current_theme)
                 prev_date = (target_date - timedelta(days=1)).strftime("%Y-%m-%d")
                 next_date = (target_date + timedelta(days=1)).strftime("%Y-%m-%d")
 
@@ -1334,19 +1351,15 @@ class ScheduleBot:
 async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error("Exception while handling an update:", exc_info=context.error)
     
-    # Збираємо текст помилки
     tb_list = traceback.format_exception(None, context.error, context.error.__traceback__)
     tb_string = "".join(tb_list)
     
-    # Беремо останній шматок помилки, щоб влізло в ліміт Telegram
     error_msg = f"🚨 <b>КРАШ БОТА!</b> 🚨\n\n<pre><code class='language-python'>{html.escape(tb_string[-3000:])}</code></pre>"
     
     if isinstance(update, Update) and update.effective_chat:
         try:
-            # Знімаємо анімацію загрузки з кнопки
             if update.callback_query:
                 await update.callback_query.answer()
-            # Відправляємо помилку в чат
             await context.bot.send_message(chat_id=update.effective_chat.id, text=error_msg, parse_mode=ParseMode.HTML)
         except Exception as e:
             logger.error(f"Не зміг відправити помилку: {e}")
@@ -1377,4 +1390,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-    
