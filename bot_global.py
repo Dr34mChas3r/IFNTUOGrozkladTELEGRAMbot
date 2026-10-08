@@ -680,6 +680,46 @@ class ScheduleBot:
         self._schedule_check_running = False
 
     @staticmethod
+    def _subgroup_label(group: str) -> str:
+        m = re.search(r'підгр\.\s*(\d+)', group or '', re.IGNORECASE)
+        return f"підгр. {m.group(1)}" if m else ""
+
+    @staticmethod
+    def _link_label(link: str) -> str:
+        l = link.lower()
+        if 'zoom' in l:
+            return "Zoom 🎥"
+        if 'meet.google' in l:
+            return "Meet 🎥"
+        if 'teams' in l:
+            return "Teams 🎥"
+        if 'dn.nung.edu.ua' in l or 'moodle' in l:
+            return "Moodle 📚"
+        return "🔗"
+
+    def _build_links_caption(self, events: List[ScheduleEvent], with_date: bool = False) -> str:
+        entries: Dict[tuple, List[str]] = {}
+        for e in events:
+            if not e.links or e.is_unselected or e.is_cancelled:
+                continue
+            key = (e.start_time, e.subject, self._subgroup_label(e.group))
+            bucket = entries.setdefault(key, [])
+            for link in e.links:
+                if link not in bucket:
+                    bucket.append(link)
+
+        lines = []
+        for (start, subject, sg), links in sorted(entries.items(), key=lambda kv: (kv[0][0], kv[0][2])):
+            emoji = PAIR_EMOJIS.get(get_pair_number(start), "📚")
+            prefix = f"{start.strftime('%d.%m')} " if with_date else ""
+            name = f"{subject} ({sg})" if sg else subject
+            links_html = " | ".join(
+                f'<a href="{html.escape(l, quote=True)}">{self._link_label(l)}</a>' for l in links
+            )
+            lines.append(f"{prefix}{emoji} {html.escape(name)}: {links_html}")
+        return "\n".join(lines)
+
+    @staticmethod
     def _fit_caption(caption: str, limit: int = 1024) -> str:
         def visible(t: str) -> int:
             return len(html.unescape(re.sub(r'<[^>]+>', '', t)))
@@ -811,76 +851,10 @@ class ScheduleBot:
             if self.image_generator:
                 photo_bio = self.image_generator.create_day_image(events, today, theme=getattr(s, 'theme', 'light'))
 
-                subject_links = {}
-                for e in events:
-                    if not e.links or getattr(e, 'is_unselected', False):
-                        continue
-                    for link in e.links:
-                        key = (e.subject, e.group)
-                        if key not in subject_links:
-                            subject_links[key] = {}
-                        if link not in subject_links[key]:
-                            subject_links[key][link] = []
-                        subject_links[key][link].append(e.start_time)
-
-                time_grouped = {}
-                for (subject, group), links_data in subject_links.items():
-                    for link, times in links_data.items():
-                        for start_time in times:
-                            time_key = start_time.strftime("%H:%M")
-                            if time_key not in time_grouped:
-                                time_grouped[time_key] = []
-                            time_grouped[time_key].append({'subject': subject, 'group': group, 'link': link, 'start_time': start_time})
-
-                sorted_times = sorted(time_grouped.keys())
-
-                links_text_lines = []
-                for time_key in sorted_times:
-                    items = time_grouped[time_key]
-                    pair_num = get_pair_number(items[0]['start_time'])
-                    pair_emoji = PAIR_EMOJIS.get(pair_num, "📚")
-
-                    time_subject_count = {}
-                    for item in items:
-                        subj = item['subject']
-                        time_subject_count[subj] = time_subject_count.get(subj, 0) + 1
-
-                    for idx, item in enumerate(items):
-                        subject = item['subject']
-                        group = item['group']
-                        link = item['link']
-
-                        subject_display = subject
-                        if time_subject_count[subject] > 1 and group:
-                            subject_display = f"{subject} {group}"
-
-                        link_name = "Meet 🎥" if "meet" in link else ("Zoom 🎥" if "zoom" in link else "🔗")
-                        if idx == 0:
-                            links_text_lines.append(f"{pair_emoji} {subject_display}: <a href=\"{link}\">{link_name}</a>")
-                        else:
-                            links_text_lines.append(f"{'   '} {subject_display}: <a href=\"{link}\">{link_name}</a>")
-
                 caption = f"📅 Сьогодні: {s.group_name}"
-                if links_text_lines:
-                    caption += "\n\n🔗 <b>Посилання на пари:</b>\n" + "\n".join(links_text_lines)
-
-                other_links = []
-                for e in events:
-                    if not e.links or getattr(e, 'is_unselected', False):
-                        continue
-                    for link in e.links:
-                        if any(x in link.lower() for x in ['zoom.us', 'meet.google', 'teams.microsoft', 'webex']):
-                            continue
-                        pair_num = get_pair_number(e.start_time)
-                        pair_emoji = PAIR_EMOJIS.get(pair_num, "📎")
-                        subject_short = e.subject[:30] + "..." if len(e.subject) > 30 else e.subject
-                        if e.group and len(events) > 1:
-                            subject_short = f"{subject_short} {e.group}"
-                        other_links.append(f"{pair_emoji} {subject_short}: <a href=\"{link}\">📄 Матеріали</a>")
-
-                if other_links:
-                    caption += "\n\n📚 <b>Додаткові матеріали:</b>\n" + "\n".join(other_links)
-
+                links_block = self._build_links_caption(events)
+                if links_block:
+                    caption += "\n\n🔗 <b>Посилання на пари:</b>\n" + links_block
                 caption = self._fit_caption(caption)
 
                 try:
@@ -978,76 +952,10 @@ class ScheduleBot:
         else:
             bio = self.image_generator.create_day_image(events, date_obj, theme=current_theme)
 
-        subject_links = {}
-        for e in events:
-            if not e.links or getattr(e, 'is_unselected', False):
-                continue
-            for link in e.links:
-                key = (e.subject, e.group)
-                if key not in subject_links:
-                    subject_links[key] = {}
-                if link not in subject_links[key]:
-                    subject_links[key][link] = []
-                subject_links[key][link].append(e.start_time)
-
-        time_grouped = {}
-        for (subject, group), links_data in subject_links.items():
-            for link, times in links_data.items():
-                for start_time in times:
-                    time_key = start_time.strftime("%d.%m %H:%M")
-                    if time_key not in time_grouped:
-                        time_grouped[time_key] = []
-                    time_grouped[time_key].append({'subject': subject, 'group': group, 'link': link, 'start_time': start_time})
-
-        sorted_times = sorted(time_grouped.keys())
-
-        links_text_lines = []
-        for time_key in sorted_times:
-            items = time_grouped[time_key]
-            pair_num = get_pair_number(items[0]['start_time'])
-            pair_emoji = PAIR_EMOJIS.get(pair_num, "📚")
-
-            time_subject_count = {}
-            for item in items:
-                subj = item['subject']
-                time_subject_count[subj] = time_subject_count.get(subj, 0) + 1
-
-            for idx, item in enumerate(items):
-                subject = item['subject']
-                group = item['group']
-                link = item['link']
-
-                subject_display = subject
-                if time_subject_count[subject] > 1 and group:
-                    subject_display = f"{subject} {group}"
-
-                link_name = "Meet 🎥" if "meet" in link else ("Zoom 🎥" if "zoom" in link else "🔗")
-                if idx == 0:
-                    links_text_lines.append(f"{pair_emoji} {subject_display}: <a href=\"{link}\">{link_name}</a>")
-                else:
-                    links_text_lines.append(f"{'   '} {subject_display}: <a href=\"{link}\">{link_name}</a>")
-
         full_caption = caption
-        if links_text_lines:
-            full_caption += "\n\n🔗 <b>Посилання на пари:</b>\n" + "\n".join(links_text_lines)
-
-        other_links = []
-        for e in events:
-            if not e.links or getattr(e, 'is_unselected', False):
-                continue
-            for link in e.links:
-                if any(x in link.lower() for x in ['zoom.us', 'meet.google', 'teams.microsoft', 'webex']):
-                    continue
-                pair_num = get_pair_number(e.start_time)
-                pair_emoji = PAIR_EMOJIS.get(pair_num, "📎")
-                subject_short = e.subject[:30] + "..." if len(e.subject) > 30 else e.subject
-                if e.group and len(events) > 1:
-                    subject_short = f"{subject_short} {e.group}"
-                other_links.append(f"{pair_emoji} {subject_short}: <a href=\"{link}\">📄 Матеріали</a>")
-
-        if other_links:
-            full_caption += "\n\n📚 <b>Додаткові матеріали:</b>\n" + "\n".join(other_links)
-
+        links_block = self._build_links_caption(events, with_date=(mode == 'week'))
+        if links_block:
+            full_caption += "\n\n🔗 <b>Посилання на пари:</b>\n" + links_block
         full_caption = self._fit_caption(full_caption)
 
         prev_date = (date_obj - timedelta(days=1)).strftime("%Y-%m-%d")
