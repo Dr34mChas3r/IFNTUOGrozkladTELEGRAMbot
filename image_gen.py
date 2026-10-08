@@ -238,8 +238,7 @@ class ScheduleImageGenerator:
         elif data['has_sg2']:
             badge_bg = colors['unsel_bar'] if is_unsel else colors['accent_orange']
             draw.rounded_rectangle([badge_x, curr_y, badge_x+165, curr_y+35], radius=8, fill=badge_bg)
-            # В неактивному стані текст білий для контрасту
-            self._draw_text(draw, pilmoji, (badge_x+15, curr_y+4), "Підгрупа 2", font=self.font_status, fill=colors['badge_text'] if is_unsel else colors['text_main'])
+            self._draw_text(draw, pilmoji, (badge_x+15, curr_y+4), "Підгрупа 2", font=self.font_status, fill=colors['badge_text'])
             badge_x += 180; badge_added = True
 
         if data['is_cancelled']:
@@ -251,12 +250,10 @@ class ScheduleImageGenerator:
 
         if data['has_qr']:
             try:
-                # Генерація QR коду з прозорим фоном
                 qr = qrcode.QRCode(box_size=2, border=1)
                 qr.add_data(event.links[0]); qr.make(fit=True)
                 
-                # Додаємо підтримку кольорів для QR-коду (щоб він не зливався у темній темі)
-                qr_img = qr.make_image(fill_color=colors['text_main'], back_color=bg_color).resize((self.QR_SIZE, self.QR_SIZE))
+                qr_img = qr.make_image(fill_color="black", back_color="white").resize((self.QR_SIZE, self.QR_SIZE))
                 img.paste(qr_img, (int(card_x2 - self.QR_SIZE - 20), int(y + self.CARD_PADDING)))
             except: pass
 
