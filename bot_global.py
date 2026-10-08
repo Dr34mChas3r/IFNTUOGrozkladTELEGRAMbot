@@ -156,7 +156,6 @@ class ScheduleChange:
         self.event = event
         self.old_event = old_event
 
-# Імпортуємо менеджери та налаштування з Postgres
 from storage_postgres import UserSettings, UserManager, build_schedule_cache_class
 ScheduleCache = build_schedule_cache_class(ScheduleEvent, ChangeType, ScheduleChange, TIMEZONE)
 
@@ -680,6 +679,18 @@ class ScheduleBot:
         self.application = None
         self._schedule_check_running = False
 
+    @staticmethod
+    def _fit_caption(caption: str, limit: int = 1024) -> str:
+        def visible(t: str) -> int:
+            return len(html.unescape(re.sub(r'<[^>]+>', '', t)))
+
+        if visible(caption) <= limit:
+            return caption
+        lines = caption.split('\n')
+        while lines and visible('\n'.join(lines)) > limit - 3:
+            lines.pop()
+        return '\n'.join(lines) + '\n…'
+
     def set_application(self, application):
         self.application = application
         self.application.job_queue.run_daily(self._daily_notification_job, time=DAILY_NOTIFICATION_TIME)
@@ -870,6 +881,8 @@ class ScheduleBot:
                 if other_links:
                     caption += "\n\n📚 <b>Додаткові матеріали:</b>\n" + "\n".join(other_links)
 
+                caption = self._fit_caption(caption)
+
                 try:
                     msg = await context.bot.send_photo(chat_id=chat_id, photo=photo_bio, caption=caption, parse_mode=ParseMode.HTML)
                     await self._pin_message_with_management(context, chat_id, msg.message_id)
@@ -957,7 +970,6 @@ class ScheduleBot:
                 await update.effective_chat.send_message(text_response, parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=kb)
             return
 
-        # Витягуємо тему користувача
         s = self.user_manager.get_user_settings(update.effective_chat.id)
         current_theme = getattr(s, 'theme', 'light')
 
@@ -1036,6 +1048,8 @@ class ScheduleBot:
         if other_links:
             full_caption += "\n\n📚 <b>Додаткові матеріали:</b>\n" + "\n".join(other_links)
 
+        full_caption = self._fit_caption(full_caption)
+
         prev_date = (date_obj - timedelta(days=1)).strftime("%Y-%m-%d")
         next_date = (date_obj + timedelta(days=1)).strftime("%Y-%m-%d")
         if mode == 'week':
@@ -1108,11 +1122,12 @@ class ScheduleBot:
             return await update.message.reply_text("📅 Формат: `/date 19.12`", parse_mode=ParseMode.MARKDOWN)
         try:
             day, month = map(int, context.args[0].split('.'))
-            target_date = date(datetime.now().year, month, day)
-            await self._generic_schedule_command(update, context, 'date', target_date)
-        except:
-            await update.message.reply_text("❌ Невірний формат.")
-            
+            target_date = date(datetime.now(TIMEZONE).year, month, day)
+        except ValueError:
+            return await update.message.reply_text("❌ Невірний формат. Приклад: `/date 19.12`", parse_mode=ParseMode.MARKDOWN)
+
+        await self._generic_schedule_command(update, context, 'date', target_date)
+
     async def electives_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         s = self.user_manager.get_user_settings(update.effective_chat.id)
         if not s.group_id:
@@ -1326,7 +1341,6 @@ class ScheduleBot:
 
             events = await asyncio.to_thread(NungParser.get_schedule, obj_id, start_date=target_date, end_date=target_date, obj_type=obj_mode)
 
-            # Витягуємо тему користувача для глобального пошуку
             s = self.user_manager.get_user_settings(update.effective_chat.id)
             current_theme = getattr(s, 'theme', 'light')
 
