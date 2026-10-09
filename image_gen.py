@@ -1,10 +1,11 @@
 import textwrap
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from io import BytesIO
 from collections import defaultdict
 from PIL import Image, ImageDraw, ImageFont
 import qrcode
 import re
+import pytz
 
 try:
     from pilmoji import Pilmoji
@@ -12,6 +13,8 @@ try:
 except ImportError:
     print("⚠️ УВАГА: Бібліотека pilmoji не знайдена! Емодзі можуть відображатися як квадратики. Встановіть: pip install pilmoji")
     HAS_PILMOJI = False
+
+KYIV_TZ = pytz.timezone('Europe/Kyiv')
 
 
 class ScheduleImageGenerator:
@@ -96,13 +99,17 @@ class ScheduleImageGenerator:
             else:
                 draw.text(pos, text, font=font, fill=fill, align=align)
 
+    def _to_local_dt(self, dt):
+        """Переводить datetime у київський час з урахуванням літнього/зимового (DST)."""
+        if not isinstance(dt, datetime):
+            return dt
+        if dt.tzinfo is None:
+            return KYIV_TZ.localize(dt)
+        return dt.astimezone(KYIV_TZ)
+
     def _to_local_date(self, dt):
         if isinstance(dt, datetime):
-            if dt.tzinfo is not None:
-                local_dt = dt.astimezone(timezone(timedelta(hours=3)))
-            else:
-                local_dt = dt + timedelta(hours=3)
-            return local_dt.date()
+            return self._to_local_dt(dt).date()
         return dt
 
     def _sort_events_globally(self, events):
@@ -488,17 +495,10 @@ class ScheduleImageGenerator:
         day_has_events = {d: False for d in range(cols)}
 
         for ev in events:
-            local_ev_date = self._to_local_date(ev.start_time)
-            d_idx = (local_ev_date - monday).days
+            local_dt = self._to_local_dt(ev.start_time)
+            d_idx = (local_dt.date() - monday).days
             if 0 <= d_idx < cols:
-                if isinstance(ev.start_time, datetime):
-                    if ev.start_time.tzinfo is not None:
-                        local_dt = ev.start_time.astimezone(timezone(timedelta(hours=3)))
-                    else:
-                        local_dt = ev.start_time + timedelta(hours=3)
-                    time_str = local_dt.strftime("%H:%M")
-                else:
-                    time_str = ev.start_time.strftime("%H:%M")
+                time_str = local_dt.strftime("%H:%M")
 
                 for i, (start, _) in enumerate(PAIR_TIMES):
                     if time_str == start:
