@@ -736,6 +736,7 @@ class ScheduleBot:
         self.application.job_queue.run_daily(self._daily_notification_job, time=DAILY_NOTIFICATION_TIME)
         self.application.job_queue.run_daily(self._weekly_notification_job, time=WEEKLY_NOTIFICATION_TIME, days=[WEEKLY_NOTIFICATION_DAY])
         self.application.job_queue.run_repeating(self._check_schedule_changes_job, interval=SCHEDULE_CHECK_INTERVAL, first=30)
+        self.application.job_queue.run_repeating(self._class_reminder_job, interval=60, first=15)
 
     async def _is_user_admin(self, update: Update) -> bool:
         if update.effective_chat.type == ChatType.PRIVATE:
@@ -897,6 +898,49 @@ class ScheduleBot:
             logger.error(f"Check job error: {e}")
         finally:
             self._schedule_check_running = False
+
+    async def _class_reminder_job(self, context: ContextTypes.DEFAULT_TYPE):
+        now = datetime.now(TIMEZONE)
+        
+        # Вікно 5 хвилин (± 30 секунд для компенсації можливих відхилень циклу)
+        target_start = now + timedelta(minutes=4, seconds=30)
+        target_end = now + timedelta(minutes=5, seconds=30)
+
+        users_to_remind = {}
+        for chat_id, s in self.user_manager.users.items():
+            # Нагадування працюють ТІЛЬКИ в приватних повідомленнях (chat_id > 0)
+            if chat_id > 0 and getattr(s, 'class_reminders', True) and s.group_id:
+                users_to_remind.setdefault(s.group_id, []).append(chat_id)
+
+        for group_id, chat_ids in users_to_remind.items():
+            try:
+                events = await self._get_events(group_id, group_name="System", start_date=now.date(), end_date=now.date())
+                if not events:
+                    continue
+
+                for e in events:
+                    if target_start <= e.start_time <= target_end:
+                        # Перевірка на загальноуніверситетську дистанційну лекцію
+                        is_general = (e.event_type in ['Л', 'Лекція', 'Л+Пр']) or ('загальноуніверситетськ' in e.subject.lower())
+                        
+                        if e.is_remote and not e.is_cancelled and is_general:
+                            for chat_id in chat_ids:
+                                s = self.user_manager.get_user_settings(chat_id)
+                                disabled_list = getattr(s, 'disabled_electives', [])
+                                
+                                # Якщо це вибіркова дисципліна і користувач її відключив - ігноруємо
+                                if e.is_elective and e.subject in disabled_list:
+                                    continue
+                                
+                                text = (f"🔔 <b>Нагадування!</b>\n\n"
+                                        f"Через 5 хвилин почнеться дистанційна пара:\n"
+                                        f"{self.formatter._build_event_details(e)}")
+                                try:
+                                    await context.bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+                                except Exception as err:
+                                    logger.error(f"Не вдалося відправити нагадування користувачу {chat_id}: {err}")
+            except Exception as ex:
+                logger.error(f"Помилка під час відправки нагадувань для групи {group_id}: {ex}")
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         s = self.user_manager.get_user_settings(update.effective_chat.id)
@@ -1133,6 +1177,12 @@ class ScheduleBot:
             kb_rows.append([InlineKeyboardButton(f"Сповіщення про зміни {'✅' if s.change_notifications else '❌'}", callback_data="toggle_changes")])
             kb_rows.append([InlineKeyboardButton(f"Щоденно о {DAILY_NOTIFICATION_TIME} {'✅' if s.daily_notifications else '❌'}", callback_data="toggle_daily")])
             kb_rows.append([InlineKeyboardButton(f"Розклад на тиждень о {WEEKLY_NOTIFICATION_TIME} {'✅' if s.weekly_notifications else '❌'}", callback_data="toggle_weekly")])
+            
+            # Налаштування нагадування лише для приватних повідомлень
+            if chat_id > 0:
+                reminders_enabled = getattr(s, 'class_reminders', True)
+                kb_rows.append([InlineKeyboardButton(f"Нагадування за 5 хв {'✅' if reminders_enabled else '❌'}", callback_data="toggle_reminders")])
+
             kb_rows.append([InlineKeyboardButton(f"Режим дебагу 🛠️ {'✅' if getattr(s, 'debug_mode', False) else '❌'}", callback_data="toggle_debug")])
 
         kb_rows.append([InlineKeyboardButton("◀️ Назад", callback_data="back")])
@@ -1228,10 +1278,18 @@ class ScheduleBot:
                 setting = "weekly_notifications"
             elif data == "toggle_debug":
                 setting = "debug_mode"
+            elif data == "toggle_reminders":
+                if update.effective_chat.id < 0:
+                    return await query.answer("Ця функція доступна лише в приватних повідомленнях!", show_alert=True)
+                setting = "class_reminders"
             else:
                 return
 
-            curr = getattr(self.user_manager.get_user_settings(update.effective_chat.id), setting, False)
+            if data == "toggle_reminders":
+                curr = getattr(self.user_manager.get_user_settings(update.effective_chat.id), setting, True)
+            else:
+                curr = getattr(self.user_manager.get_user_settings(update.effective_chat.id), setting, False)
+
             self.user_manager.update_user_setting(update.effective_chat.id, setting, not curr)
             await self.notifications_command(update, context)
 
