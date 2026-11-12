@@ -29,6 +29,7 @@ class UserSettings:
         self.disabled_electives: List[str] = []
         self.debug_mode = False
         self.theme = "light"
+        self.class_reminders = True  # За замовчуванням увімкнено
 
     def to_dict(self) -> dict:
         return {
@@ -41,7 +42,8 @@ class UserSettings:
             'pinned_messages': self.pinned_messages,
             'disabled_electives': self.disabled_electives,
             'debug_mode': getattr(self, 'debug_mode', False),
-            'theme': getattr(self, 'theme', 'light')
+            'theme': getattr(self, 'theme', 'light'),
+            'class_reminders': getattr(self, 'class_reminders', True)
         }
 
     @classmethod
@@ -56,6 +58,7 @@ class UserSettings:
         settings.disabled_electives = data.get('disabled_electives', [])
         settings.debug_mode = data.get('debug_mode', False)
         settings.theme = data.get('theme', 'light')
+        settings.class_reminders = data.get('class_reminders', True)
         return settings
 
     @classmethod
@@ -70,6 +73,7 @@ class UserSettings:
         s.disabled_electives = row.get('disabled_electives') or []
         s.debug_mode = row.get('debug_mode', False)
         s.theme = row.get('theme', 'light')
+        s.class_reminders = row.get('class_reminders', True)
         return s
 
 class UserManager:
@@ -94,10 +98,14 @@ class UserManager:
                         debug_mode BOOLEAN NOT NULL DEFAULT FALSE
                     )
                 """)
-                # Безпечне додавання нової колонки, якщо вона ще не існує
+                # Безпечне додавання нових колонок, якщо вони ще не існують
                 cur.execute("""
                     ALTER TABLE users 
                     ADD COLUMN IF NOT EXISTS theme TEXT NOT NULL DEFAULT 'light';
+                """)
+                cur.execute("""
+                    ALTER TABLE users 
+                    ADD COLUMN IF NOT EXISTS class_reminders BOOLEAN NOT NULL DEFAULT TRUE;
                 """)
             conn.commit()
 
@@ -121,8 +129,8 @@ class UserManager:
                         INSERT INTO users (chat_id, group_name, group_id,
                             change_notifications, daily_notifications,
                             weekly_notifications, pinned_messages,
-                            disabled_electives, debug_mode, theme)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            disabled_electives, debug_mode, theme, class_reminders)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (chat_id) DO UPDATE SET
                             group_name = EXCLUDED.group_name,
                             group_id = EXCLUDED.group_id,
@@ -132,14 +140,15 @@ class UserManager:
                             pinned_messages = EXCLUDED.pinned_messages,
                             disabled_electives = EXCLUDED.disabled_electives,
                             debug_mode = EXCLUDED.debug_mode,
-                            theme = EXCLUDED.theme
+                            theme = EXCLUDED.theme,
+                            class_reminders = EXCLUDED.class_reminders
                     """, (
                         settings.chat_id, settings.group_name, settings.group_id,
                         settings.change_notifications, settings.daily_notifications,
                         settings.weekly_notifications,
                         psycopg2.extras.Json(settings.pinned_messages),
                         psycopg2.extras.Json(settings.disabled_electives),
-                        settings.debug_mode, settings.theme
+                        settings.debug_mode, settings.theme, settings.class_reminders
                     ))
                 conn.commit()
         except Exception as e:
